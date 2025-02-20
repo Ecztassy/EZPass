@@ -1,0 +1,466 @@
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+component StyledButton inherits Button {
+    height: 40px;
+    primary: true;
+}
+
+// StyledButton1 Component
+component StyledButton1 inherits Rectangle {
+    in-out property <string> text <=> txt.text;
+    callback clicked <=> touch.clicked;
+
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: self.background.darker(25%);
+    background: touch.pressed ? #6b828200 : touch.has-hover ? #6c616c00 : #0c86ff00;
+    height: txt.preferred-height * 2;
+    width: 300px;
+
+    txt := Text {
+        x: (parent.width - self.width) / 2 + (touch.pressed ? 2px : 0);
+        y: (parent.height - self.height) / 2 + (touch.pressed ? 1px : 0);
+        color: touch.pressed ? #ffffff : #eeeeee;
+        font-size: 16px;
+    }
+    touch := TouchArea { }
+}
+
+export struct PasswordEntry {
+    id: int,
+    website: string,
+    username_email: string,
+    password: string,
+}
+
+// LoginWindow Component
+export component LoginWindow inherits Window {
+    title: "EzPass";
+    icon: @image-url("icon/icon.png");
+    width: 600px;
+    height: 400px;
+    in-out property <string> username;
+    in-out property <string> password;
+    in-out property <string> message;
+    callback login-clicked();
+    callback register-clicked();
+    callback forgot_password();
+    default-font-family: @tr("Poppins-Black");
+    default-font-size: 0cm;
+
+    Rectangle {
+        background: black;
+        width: 100%;
+        height: 100%;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 15px;
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 0px;
+
+                Image {
+                    source: @image-url("icon/icon.png");
+                    width: 80px;
+                    height: 80px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "EZPass";
+                    vertical-alignment: center;
+                    font-size: 40px;
+                    font-family: "Poppins";
+                    font-italic: false;
+                }
+            }
+
+            LineEdit {
+                height: 40px;
+                placeholder-text: "User";
+                font-size: 16px;
+                text <=> root.username;
+            }
+
+            LineEdit {
+                height: 40px;
+                placeholder-text: "Palavra-Passe";
+                font-size: 16px;
+                input-type: InputType.password;
+                text <=> root.password;
+            }
+
+            StyledButton {
+                text: "Login";
+                clicked => { root.login-clicked(); }
+            }
+
+            StyledButton {
+                text: "Registro";
+                clicked => { root.register-clicked(); }
+            }
+
+            Text {
+                text: root.message;
+                font-size: 16px;
+                color: #dc3545;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 0px;
+                padding-bottom: 10px;
+                StyledButton1 {
+                    text: "Esqueceu-se da password?";
+                    clicked => { 
+                        root.forgot_password(); 
+                    }
+                    padding-bottom: 10px;
+                }
+            }
+        }
+    }
+}
+
+// PasswordCard Component
+component PasswordCard inherits Rectangle {
+    in-out property <int> id: 1;
+    in property <string> website;
+    in property <string> username_email;
+    in property <string> password;
+    callback edit-clicked(int);
+    callback delete-clicked(int);
+
+    width: 180px;
+    height: 120px;
+    background: #3a3a3a;
+    border-radius: 8px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 5px;
+
+        Text {
+            text: root.website;
+            color: white;
+            font-size: 16px;
+        }
+
+        Text {
+            text: root.username_email;
+            color: #cccccc;
+            font-size: 12px;
+        }
+
+        LineEdit {
+            text: root.password;
+            font-size: 12px;
+            input-type: InputType.password;
+            read-only: true;
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 5px;
+
+            TouchArea {
+                width: 24px;
+                height: 24px;
+                clicked => { root.edit-clicked(root.id); }
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: #555555;
+                    border-radius: 4px;
+
+                    Text {
+                        text: "✎";
+                        color: white;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            TouchArea {
+                width: 24px;
+                height: 24px;
+                clicked => { root.delete-clicked(root.id); }
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: #555555;
+                    border-radius: 4px;
+
+                    Text {
+                        text: "🗑";
+                        color: white;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// BlackSquareWindow Component
+// BlackSquareWindow Component
+export component BlackSquareWindow inherits Window {
+    title: "EZPass";
+    icon: @image-url("icon/icon.png");
+    min-width: 800px;
+    min-height: 600px;
+    in-out property <[PasswordEntry]> password_entries;
+    in-out property <bool> panelVisible: false;
+    in-out property <string> selected_website;
+    in-out property <string> selected_username_email;
+    in-out property <string> selected_password;
+    property <bool> passwordVisible: false;
+    property <bool> editvisible: false;
+    in-out property <bool> isAddMode: false;
+    in-out property <bool> editmode: false;
+    in-out property <int> id;
+    callback refresh_passwords();
+    callback add_password();
+    callback savePassword();
+    in-out property <string> message;
+    callback edit(int, string, string, string);
+    callback deletePassword(int);
+
+    Rectangle {
+        background: black;
+        width: 100%;
+        height: 100%;
+
+        HorizontalLayout {
+            width: 100%;
+            spacing: 10px;
+            padding: 10px;
+
+            // Left side - Scrollable layout for dynamically creating grids
+            Rectangle {
+                width: 40%;
+                height: parent.height;
+
+                VerticalLayout {
+                    spacing: 10px;
+                    width: 100%;
+
+                    // Header with + button
+                    HorizontalLayout {
+                        height: 40px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+
+                        Text {
+                            text: "Passwords";
+                            color: white;
+                            font-size: 18px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { width: 1px; }
+
+                        TouchArea {
+                            width: 30px;
+                            height: 30px;
+                            padding-bottom: 10px;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.isAddMode = true;
+                                root.panelVisible = true;
+                                root.selected_website = "";
+                                root.selected_username_email = "";
+                                root.selected_password = "";
+                                debug("Add password");
+                            }
+
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: #555555;
+                                border-radius: 4px;
+
+                                Text {
+                                    text: "+";
+                                    color: white;
+                                    padding-bottom: 10px;
+                                    font-size: 20px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Scrollable area for password cards
+                    ScrollView {
+                        width: 100%;
+                        height: parent.height - 50px;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            for entry in root.password_entries: PasswordCard {
+                                width: 100%;
+                                website: entry.website;
+                                username_email: entry.username_email;
+                                password: entry.password;
+
+                                edit-clicked => {
+                                    root.isAddMode = false;
+                                    root.selected_website = entry.website;
+                                    root.id = entry.id;
+                                    root.selected_username_email = entry.username_email;
+                                    root.selected_password = entry.password;
+                                    root.panelVisible = true;
+                                    debug("Editing entry for: " + entry.id);
+                                }
+
+                                delete-clicked => {
+                                    debug("Deleting entry for: " + entry.id);
+                                    root.deletePassword(entry.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Right side - Panel for displaying and editing card info
+            Rectangle {
+                height: parent.height;
+                background: #000000;
+                border-radius: 8px;
+                padding: 20px;
+                visible: root.panelVisible;
+
+                VerticalLayout {
+                    alignment: LayoutAlignment.stretch;
+                    width: 50%;
+                    min-width: 0px;
+                    preferred-height: 0px;
+                    spacing: 20px;
+
+                    // Header with gear button
+                    HorizontalLayout {
+                        height: 40px;
+
+                        Text {
+                            text: root.isAddMode ? "Add Password" : "Edit Password";
+                            font-size: 18px;
+                            color: white;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { width: 1px; }
+
+                        TouchArea {
+                            width: 30px;
+                            height: 30px;
+                            mouse-cursor: pointer;
+                            clicked => { debug("Open settings"); }
+
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: #555555;
+                                border-radius: 4px;
+
+                                Text {
+                                    text: "⚙";
+                                    color: white;
+                                    font-size: 20px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    LineEdit {
+                        placeholder-text: "Website";
+                        text <=> root.selected_website;
+                        font-size: 16px;
+                        height: 40px;
+                    }
+
+                    LineEdit {
+                        placeholder-text: "User/E-mail";
+                        text <=> root.selected_username_email;
+                        font-size: 16px;
+                        height: 40px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            placeholder-text: "Password";
+                            text <=> root.selected_password;
+                            font-size: 16px;
+                            height: 40px;
+                            input-type: root.passwordVisible ? InputType.text : InputType.password;
+                        }
+                        Rectangle {
+                            width: 40px;
+                            height: 40px;
+                            background: transparent;
+                            Text {
+                                text: "👁";
+                                font-size: 24px;
+                                color: root.passwordVisible ? #007AFF : #8E8E93;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                clicked => {
+                                    root.passwordVisible = !root.passwordVisible;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        StyledButton {
+                            text: "Save";
+                            clicked => {
+                                if (root.selected_website != "" && root.selected_username_email != "" && root.selected_password != "") {
+                                    root.savePassword();
+                                } else {
+                                    root.message = "❌ Please fill in all fields.";
+                                }
+                            }
+                        }
+                        StyledButton {
+                            text: "Cancel";
+                            clicked => {
+                                root.panelVisible = false;
+                                root.selected_website = "";
+                                root.selected_username_email = "";
+                                root.selected_password = "";
+                            }
+                        }
+                    }
+                    
+                    Text {
+                                text: root.message;
+                                font-size: 24px;
+                                color:white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
