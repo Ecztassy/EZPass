@@ -16,12 +16,14 @@ dependencies = [
  "diesel",
  "dirs",
  "futures-util",
+ "once_cell",
  "orion",
  "publicsuffix",
  "r2d2",
  "r2d2_sqlite",
  "rand 0.8.5",
  "rand_core 0.9.1",
+ "regex",
  "rfd",
  "rusqlite",
  "serde",
@@ -3580,9 +3582,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.20.3"
+version = "1.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "945462a4b81e43c4e3ba96bd7b49d834c6f61198356aa858733bc4acf3cbe62e"
+checksum = "cde51589ab56b20a6f686b2c68f7a0bd6add753d697abf720d63f8db3ab7b1ad"
 dependencies = [
  "critical-section",
  "portable-atomic",

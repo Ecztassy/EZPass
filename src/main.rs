@@ -36,12 +36,13 @@ struct FieldPreference {
     role: String,
 }
 
-async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
+// WebSocket server
+async fn start_websocket_server(conn: Arc<Pool<SqliteConnectionManager>>) {
     let listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
     println!("WebSocket server running on ws://127.0.0.1:9001");
 
     while let Ok((stream, _)) = listener.accept().await {
-        let conn1_clone = Arc::clone(&conn1);
+        let conn_clone = Arc::clone(&conn);
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(ws_stream) => {
@@ -53,9 +54,13 @@ async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
                                     let parts: Vec<&str> = text[5..].split("|").collect();
                                     if parts.len() == 3 {
                                         let website = parts[0];
+                                        println!("Received ADD_PASSWORD: {}", text);
+                                        println!("Parsed parts: {:?}", parts);
                                         let selector = parts[1];
                                         let role = parts[2];
-                                        match tokio::task::block_in_place(|| save_field_preference(&conn1_clone, website, selector, role)) {
+                                        match tokio::task::block_in_place(|| {
+                                            save_field_preference(&conn_clone, website, selector, role)
+                                        }) {
                                             Ok(()) => WebSocketResponse {
                                                 password: None,
                                                 username_email: None,
@@ -77,9 +82,9 @@ async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
                                             error: Some("Invalid PREF format".to_string()),
                                         }
                                     }
-                                } else if text.starts_with("GET_PREFS:") {
+                                } else if text.starts_with("GET_PREFS") {
                                     let website = &text[10..];
-                                    match tokio::task::block_in_place(|| get_field_preferences(&conn1_clone, website)) {
+                                    match tokio::task::block_in_place(|| get_field_preferences(&conn_clone, website)) {
                                         Ok(prefs) => WebSocketResponse {
                                             password: None,
                                             username_email: None,
@@ -95,7 +100,7 @@ async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
                                     }
                                 } else if text.starts_with("GET_PASSWORD:") {
                                     let website = &text[13..];
-                                    match tokio::task::block_in_place(|| retrieve_password(&conn1_clone, website)) {
+                                    match tokio::task::block_in_place(|| retrieve_password(&conn_clone, website)) {
                                         Ok(password_opt) => WebSocketResponse {
                                             password: password_opt,
                                             username_email: None,
@@ -109,9 +114,49 @@ async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
                                             error: Some(format!("Failed to retrieve password: {}", e)),
                                         },
                                     }
+                                } else if text.starts_with("ADD_PASSWORD") {
+                                    println!("Received ADD_PASSWORD: {}", text);
+                                    let parts: Vec<&str> = text[12..].split("|").collect();
+                                    println!("Parsed parts: {:?}", parts); // Add this line
+                                    if parts.len() == 3 {
+                                        let website = parts[0];
+                                        println!("Extracted website: '{}'", website); // Add this line
+                                        let username_email = parts[1];
+                                        let password = parts[2];
+                                        match tokio::task::block_in_place(|| {
+                                            add_password(&conn_clone, website, username_email, password)
+                                        }) {
+                                            Ok(()) => {
+                                                println!("Password added successfully for {}", website);
+                                                WebSocketResponse {
+                                                    password: Some(password.to_string()),
+                                                    username_email: Some(username_email.to_string()),
+                                                    preferences: Vec::new(),
+                                                    error: None,
+                                                }
+                                            }
+                                            Err(e) => {
+                                                println!("Failed to add password for {}: {}", website, e);
+                                                WebSocketResponse {
+                                                    password: None,
+                                                    username_email: None,
+                                                    preferences: Vec::new(),
+                                                    error: Some(format!("Failed to add password: {}", e)),
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        println!("Invalid ADD_PASSWORD format: {}", text);
+                                        WebSocketResponse {
+                                            password: None,
+                                            username_email: None,
+                                            preferences: Vec::new(),
+                                            error: Some("Invalid ADD_PASSWORD format".to_string()),
+                                        }
+                                    }
                                 } else {
                                     println!("Received URL from extension: {}", text);
-                                    match tokio::task::block_in_place(|| retrieve_password_and_prefs(&conn1_clone, &text)) {
+                                    match tokio::task::block_in_place(|| retrieve_password_and_prefs(&conn_clone, &text)) {
                                         Ok((password_opt, username_opt, prefs)) => WebSocketResponse {
                                             password: password_opt,
                                             username_email: username_opt,
@@ -138,25 +183,12 @@ async fn start_websocket_server(conn1: Arc<Pool<SqliteConnectionManager>>) {
                             }
                             Ok(message) => {
                                 match message {
-                                    Message::Binary(data) => {
-                                        println!("Received binary message: {} bytes", data.len());
-                                        println!("Binary data (first 100 bytes): {:?}", &data[..data.len().min(100)]);
-                                    }
-                                    Message::Ping(data) => {
-                                        println!("Received ping message: {:?}", data);
-                                    }
-                                    Message::Pong(data) => {
-                                        println!("Received pong message: {:?}", data);
-                                    }
-                                    Message::Close(close_frame) => {
-                                        println!("Received close message: {:?}", close_frame);
-                                    }
-                                    Message::Frame(frame) => {
-                                        println!("Received raw frame: {:?}", frame);
-                                    }
-                                    _ => {
-                                        println!("Received unexpected message type");
-                                    }
+                                    Message::Binary(data) => println!("Received binary message: {} bytes", data.len()),
+                                    Message::Ping(data) => println!("Received ping message: {:?}", data),
+                                    Message::Pong(data) => println!("Received pong message: {:?}", data),
+                                    Message::Close(close_frame) => println!("Received close message: {:?}", close_frame),
+                                    Message::Frame(frame) => println!("Received raw frame: {:?}", frame),
+                                    _ => println!("Received unexpected message type"),
                                 }
                             }
                             Err(e) => {
@@ -254,8 +286,7 @@ async fn main() -> Result<()> {
                 id INTEGER PRIMARY KEY,
                 website TEXT NOT NULL,
                 username_email TEXT NOT NULL,
-                password TEXT NOT NULL CHECK(length(password) <= 3128),
-                hash TEXT NOT NULL
+                password TEXT NOT NULL CHECK(length(password) <= 3128)
             )",
             [],
         )?;
@@ -385,11 +416,6 @@ async fn main() -> Result<()> {
             let website = window.get_selected_website().to_string();
             let username_email = window.get_selected_username_email().to_string();
             let password = window.get_selected_password().to_string();
-            let hash = hash_password(&password).unwrap_or_else(|e| {
-                eprintln!("Failed to hash password: {}", e);
-                String::new()
-            });
-
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
                 window.set_message(SharedString::from("All fields are required."));
                 return;
@@ -400,7 +426,7 @@ async fn main() -> Result<()> {
 
             slint::spawn_local(async move {
                 let result = if window.get_isAddMode() {
-                    add_password(&conn1_clone, &website, &username_email, &password, &hash).await
+                    add_password(&conn1_clone, &website, &username_email, &password)
                 } else {
                     let id = window.get_id();
                     update_password(&conn1_clone, id, &website, &username_email, &password).await
@@ -674,10 +700,7 @@ async fn main() -> Result<()> {
             let website = window.get_selected_website().to_string();
             let username_email = window.get_selected_username_email().to_string();
             let password = window.get_selected_password().to_string();
-            let hash = hash_password(&password).unwrap_or_else(|e| {
-                eprintln!("Failed to hash password: {}", e);
-                String::new()
-            });
+
 
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
                 window.set_message(SharedString::from("All fields are required."));
@@ -689,7 +712,7 @@ async fn main() -> Result<()> {
 
             slint::spawn_local(async move {
                 let result = if window.get_isAddMode() {
-                    add_password(&conn1_clone, &website, &username_email, &password, &hash).await
+                    add_password(&conn1_clone, &website, &username_email, &password)
                 } else {
                     let id = window.get_id();
                     update_password(&conn1_clone, id, &website, &username_email, &password).await
@@ -1011,17 +1034,16 @@ async fn hash_all_databases(db_paths: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn add_password(
+fn add_password(
     conn: &Arc<Pool<SqliteConnectionManager>>,
     website: &str,
     username_email: &str,
     password: &str,
-    hash: &str,
 ) -> Result<()> {
     let conn = conn.get()?;
     conn.execute(
-        "INSERT INTO Passwords (website, username_email, password, hash) VALUES (?1, ?2, ?3, ?4)",
-        params![website, username_email, password, hash],
+        "INSERT INTO Passwords (website, username_email, password) VALUES (?1, ?2, ?3)",
+        params![website, username_email, password],
     )?;
     Ok(())
 }
