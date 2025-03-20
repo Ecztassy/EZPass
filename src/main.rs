@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use rand::RngCore;
 use rfd::FileDialog;
-use rusqlite::params;
-use slint::{SharedString, ModelRc, VecModel, Weak};
-use rand::{rngs::OsRng, Rng};
+use rusqlite::{params, OptionalExtension};
+use slint::{ModelRc, VecModel, Weak};
+use rand::rngs::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use anyhow::{Result, anyhow};
 use sha2::{Sha256, Digest};
@@ -16,9 +17,15 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use futures_util::{StreamExt, SinkExt};
 use r2d2_sqlite::SqliteConnectionManager;
 use r2d2::Pool;
-use serde::{Serialize, Deserialize};
+use serde_derive::{Serialize, Deserialize};
 use serde_json;
+use tokio::sync::mpsc::{channel, Sender, Receiver};
+use winreg::RegKey;
+use winreg::enums::*;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
+static WEBSOCKET_TASK: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
 
 slint::include_modules!();
 
@@ -30,198 +37,135 @@ struct WebSocketResponse {
     error: Option<String>,
 }
 
+#[derive(Debug)]
+enum UiUpdate {
+    AddPasswordSuccess(Vec<PasswordEntry>),
+    Error(String),
+}
+
 #[derive(Serialize, Deserialize)]
 struct FieldPreference {
     selector: String,
     role: String,
 }
 
-// WebSocket server
-async fn start_websocket_server(conn: Arc<Pool<SqliteConnectionManager>>) {
+async fn start_websocket_server(
+    conn: Arc<Pool<SqliteConnectionManager>>,
+    black_square_window: Weak<BlackSquareWindow>,
+    ui_sender: Sender<UiUpdate>,
+    user_id: i32,
+) {
+    let _ = black_square_window;
     let listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
-    println!("WebSocket server running on ws://127.0.0.1:9001");
+    println!("WebSocket server running on ws://127.0.0.1:9001 for user_id: {}", user_id);
 
     while let Ok((stream, _)) = listener.accept().await {
         let conn_clone = Arc::clone(&conn);
+        let ui_sender_clone = ui_sender.clone();
+        let user_id = user_id;
         tokio::spawn(async move {
-            match accept_async(stream).await {
-                Ok(ws_stream) => {
-                    let (mut write, mut read) = ws_stream.split();
-                    while let Some(msg) = read.next().await {
-                        match msg {
-                            Ok(Message::Text(text)) => {
-                                let response = if text.starts_with("PREF:") {
-                                    let parts: Vec<&str> = text[5..].split("|").collect();
-                                    if parts.len() == 3 {
-                                        let website = parts[0];
-                                        println!("Received ADD_PASSWORD: {}", text);
-                                        println!("Parsed parts: {:?}", parts);
-                                        let selector = parts[1];
-                                        let role = parts[2];
-                                        match tokio::task::block_in_place(|| {
-                                            save_field_preference(&conn_clone, website, selector, role)
-                                        }) {
-                                            Ok(()) => WebSocketResponse {
-                                                password: None,
-                                                username_email: None,
-                                                preferences: Vec::new(),
-                                                error: None,
-                                            },
-                                            Err(e) => WebSocketResponse {
-                                                password: None,
-                                                username_email: None,
-                                                preferences: Vec::new(),
-                                                error: Some(format!("Failed to save preference: {}", e)),
-                                            },
-                                        }
-                                    } else {
-                                        WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: Some("Invalid PREF format".to_string()),
-                                        }
-                                    }
-                                } else if text.starts_with("GET_PREFS") {
-                                    let website = &text[10..];
-                                    match tokio::task::block_in_place(|| get_field_preferences(&conn_clone, website)) {
-                                        Ok(prefs) => WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: prefs,
-                                            error: None,
-                                        },
-                                        Err(e) => WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: Some(format!("Failed to get preferences: {}", e)),
-                                        },
-                                    }
-                                } else if text.starts_with("GET_PASSWORD:") {
-                                    let website = &text[13..];
-                                    match tokio::task::block_in_place(|| retrieve_password(&conn_clone, website)) {
-                                        Ok(password_opt) => WebSocketResponse {
-                                            password: password_opt,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: None,
-                                        },
-                                        Err(e) => WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: Some(format!("Failed to retrieve password: {}", e)),
-                                        },
-                                    }
-                                } else if text.starts_with("ADD_PASSWORD") {
-                                    println!("Received ADD_PASSWORD: {}", text);
-                                    let parts: Vec<&str> = text[12..].split("|").collect();
-                                    println!("Parsed parts: {:?}", parts); // Add this line
-                                    if parts.len() == 3 {
-                                        let website = parts[0];
-                                        println!("Extracted website: '{}'", website); // Add this line
-                                        let username_email = parts[1];
-                                        let password = parts[2];
-                                        match tokio::task::block_in_place(|| {
-                                            add_password(&conn_clone, website, username_email, password)
-                                        }) {
-                                            Ok(()) => {
-                                                println!("Password added successfully for {}", website);
-                                                WebSocketResponse {
-                                                    password: Some(password.to_string()),
-                                                    username_email: Some(username_email.to_string()),
-                                                    preferences: Vec::new(),
-                                                    error: None,
-                                                }
-                                            }
-                                            Err(e) => {
-                                                println!("Failed to add password for {}: {}", website, e);
-                                                WebSocketResponse {
-                                                    password: None,
-                                                    username_email: None,
-                                                    preferences: Vec::new(),
-                                                    error: Some(format!("Failed to add password: {}", e)),
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        println!("Invalid ADD_PASSWORD format: {}", text);
-                                        WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: Some("Invalid ADD_PASSWORD format".to_string()),
-                                        }
-                                    }
-                                } else {
-                                    println!("Received URL from extension: {}", text);
-                                    match tokio::task::block_in_place(|| retrieve_password_and_prefs(&conn_clone, &text)) {
-                                        Ok((password_opt, username_opt, prefs)) => WebSocketResponse {
-                                            password: password_opt,
-                                            username_email: username_opt,
-                                            preferences: prefs,
-                                            error: None,
-                                        },
-                                        Err(e) => WebSocketResponse {
-                                            password: None,
-                                            username_email: None,
-                                            preferences: Vec::new(),
-                                            error: Some(format!("Database error: {}", e)),
-                                        },
-                                    }
-                                };
-
-                                let json_response = serde_json::to_string(&response).unwrap_or_else(|e| {
-                                    format!("{{\"error\":\"Serialization error: {}\"}}", e)
-                                });
-                                if let Err(e) = write.send(Message::Text(json_response.into())).await {
-                                    eprintln!("Failed to send response: {}", e);
-                                    break;
-                                }
-                                println!("Sent response for {}", text);
-                            }
-                            Ok(message) => {
-                                match message {
-                                    Message::Binary(data) => println!("Received binary message: {} bytes", data.len()),
-                                    Message::Ping(data) => println!("Received ping message: {:?}", data),
-                                    Message::Pong(data) => println!("Received pong message: {:?}", data),
-                                    Message::Close(close_frame) => println!("Received close message: {:?}", close_frame),
-                                    Message::Frame(frame) => println!("Received raw frame: {:?}", frame),
-                                    _ => println!("Received unexpected message type"),
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Error reading WebSocket message: {}", e);
+            if let Ok(ws_stream) = accept_async(stream).await {
+                let (mut write, mut read) = ws_stream.split();
+                while let Some(msg) = read.next().await {
+                    match msg {
+                        Ok(Message::Text(text)) => {
+                            let response = process_websocket_message(&conn_clone, &text, &ui_sender_clone, user_id).await;
+                            let json_response = serde_json::to_string(&response).unwrap_or_else(|e| {
+                                format!("{{\"error\":\"Serialization error: {}\"}}", e)
+                            });
+                            if let Err(e) = write.send(Message::Text(json_response.into())).await {
+                                eprintln!("Failed to send response: {}", e);
                                 break;
                             }
                         }
+                        Ok(_) => println!("Received non-text message"),
+                        Err(e) => {
+                            eprintln!("Error reading WebSocket message: {}", e);
+                            break;
+                        }
                     }
                 }
-                Err(e) => eprintln!("Failed to accept WebSocket connection: {}", e),
             }
         });
     }
 }
 
-fn retrieve_password_and_prefs(conn1: &Arc<Pool<SqliteConnectionManager>>, website: &str) -> Result<(Option<String>, Option<String>, Vec<FieldPreference>)> {
-    let conn = conn1.get()?;
-    let mut stmt = conn.prepare("SELECT password, username_email FROM Passwords WHERE website = ?1")?;
-    let mut rows = stmt.query(params![website])?;
+async fn process_websocket_message(
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+    text: &str,
+    ui_sender: &Sender<UiUpdate>,
+    user_id: i32,
+) -> WebSocketResponse {
+    if text.starts_with("PREF:") {
+        let parts: Vec<&str> = text[5..].split("|").collect();
+        if parts.len() == 3 {
+            match save_field_preference(conn, parts[0], parts[1], parts[2]) {
+                Ok(()) => WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: None },
+                Err(e) => WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some(e.to_string()) },
+            }
+        } else {
+            WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some("Invalid PREF format".to_string()) }
+        }
+    } else if text.starts_with("GET_PREFS") {
+        let website = &text[10..];
+        match get_field_preferences(conn, website) {
+            Ok(prefs) => WebSocketResponse { password: None, username_email: None, preferences: prefs, error: None },
+            Err(e) => WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some(e.to_string()) },
+        }
+    } else if text.starts_with("GET_PASSWORD:") {
+        let website = &text[13..];
+        match retrieve_password(conn, user_id, website) {
+            Ok(password_opt) => WebSocketResponse { password: password_opt, username_email: None, preferences: Vec::new(), error: None },
+            Err(e) => WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some(e.to_string()) },
+        }
+    } else if text.starts_with("ADD_PASSWORD") {
+        let parts: Vec<&str> = text[12..].split("|").collect();
+        if parts.len() == 3 {
+            match add_password(conn, user_id, parts[0], parts[1], parts[2]) {
+                Ok(()) => {
+                    let conn_clone = Arc::clone(conn);
+                    let ui_sender_clone = ui_sender.clone();
+                    tokio::spawn(async move {
+                        let passwords = read_stored_passwords(&conn_clone, user_id).await.unwrap_or_default();
+                        let _ = ui_sender_clone.send(UiUpdate::AddPasswordSuccess(passwords)).await;
+                    });
+                    WebSocketResponse { password: Some(parts[2].to_string()), username_email: Some(parts[1].to_string()), preferences: Vec::new(), error: None }
+                }
+                Err(e) => {
+                    let _ = ui_sender.send(UiUpdate::Error(e.to_string())).await;
+                    WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some(e.to_string()) }
+                }
+            }
+        } else {
+            let _ = ui_sender.send(UiUpdate::Error("Invalid ADD_PASSWORD format".to_string())).await;
+            WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some("Invalid ADD_PASSWORD format".to_string()) }
+        }
+    } else {
+        match retrieve_password_and_prefs(conn, user_id, text) {
+            Ok((password_opt, username_opt, prefs)) => WebSocketResponse { password: password_opt, username_email: username_opt, preferences: prefs, error: None },
+            Err(e) => WebSocketResponse { password: None, username_email: None, preferences: Vec::new(), error: Some(e.to_string()) },
+        }
+    }
+}
+
+fn retrieve_password_and_prefs(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str) -> Result<(Option<String>, Option<String>, Vec<FieldPreference>)> {
+    let db_conn = conn.get()?;
+    let mut stmt = db_conn.prepare("SELECT password, username_email FROM Passwords WHERE user_id = ?1 AND website = ?2")?;
+    let mut rows = stmt.query(params![user_id, website])?;
     let (password, username_email) = if let Some(row) = rows.next()? {
         (Some(row.get(0)?), Some(row.get(1)?))
     } else {
         (None, None)
     };
-    let prefs = get_field_preferences(conn1, website)?;
+    let prefs = get_field_preferences(conn, website)?;
     Ok((password, username_email, prefs))
 }
 
-fn save_field_preference(conn1: &Arc<Pool<SqliteConnectionManager>>, website: &str, selector: &str, role: &str) -> Result<()> {
+fn save_field_preference(conn: &Arc<Pool<SqliteConnectionManager>>, website: &str, selector: &str, role: &str) -> Result<()> {
     if role != "Username" && role != "Password" {
         return Err(anyhow!("Invalid role: {}", role));
     }
-    let conn = conn1.get()?;
+    let conn = conn.get()?;
     conn.execute(
         "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?1, ?2, ?3)",
         params![website, selector, role],
@@ -229,46 +173,28 @@ fn save_field_preference(conn1: &Arc<Pool<SqliteConnectionManager>>, website: &s
     Ok(())
 }
 
-fn get_field_preferences(conn1: &Arc<Pool<SqliteConnectionManager>>, website: &str) -> Result<Vec<FieldPreference>> {
-    let conn = conn1.get()?;
+fn get_field_preferences(conn: &Arc<Pool<SqliteConnectionManager>>, website: &str) -> Result<Vec<FieldPreference>> {
+    let conn = conn.get()?;
     let mut stmt = conn.prepare("SELECT selector, role FROM FieldPreferences WHERE website = ?1")?;
     let pref_iter = stmt.query_map(params![website], |row| {
-        Ok(FieldPreference {
-            selector: row.get(0)?,
-            role: row.get(1)?,
-        })
+        Ok(FieldPreference { selector: row.get(0)?, role: row.get(1)? })
     })?;
-    let preferences: Vec<_> = pref_iter.collect::<Result<_, _>>()?;
-    Ok(preferences)
+    Ok(pref_iter.collect::<Result<_, _>>()?)
 }
 
-fn retrieve_password(conn1: &Arc<Pool<SqliteConnectionManager>>, website: &str) -> Result<Option<String>> {
-    let conn = conn1.get()?;
-    let mut stmt = conn.prepare("SELECT password FROM Passwords WHERE website = ?1")?;
-    let mut rows = stmt.query(params![website])?;
-    if let Some(row) = rows.next()? {
-        let password: String = row.get(0)?;
-        Ok(Some(password))
-    } else {
-        Ok(None)
-    }
+fn retrieve_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str) -> Result<Option<String>> {
+    let conn = conn.get()?;
+    let mut stmt = conn.prepare("SELECT password FROM Passwords WHERE user_id = ?1 AND website = ?2")?;
+    let mut rows = stmt.query(params![user_id, website])?;
+    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let db_paths = vec!["login.db", "pass.db"];
-    hash_all_databases(&db_paths).await?;
-
-    let dblogin_path = "login.db";
-    let dbpass_path = "pass.db";
-
-    let login_manager = SqliteConnectionManager::file(dblogin_path);
-    let pass_manager = SqliteConnectionManager::file(dbpass_path);
-    let conn = Arc::new(Pool::builder().max_size(15).build(login_manager)?);
-    let conn1 = Arc::new(Pool::builder().max_size(15).build(pass_manager)?);
+async fn setup_databases(db_paths: &[&str]) -> Result<Arc<Pool<SqliteConnectionManager>>> {
+    hash_all_databases(db_paths).await?;
+    let pool = Arc::new(Pool::builder().max_size(15).build(SqliteConnectionManager::file(db_paths[0]))?);
 
     {
-        let conn = conn.get()?;
+        let conn = pool.get()?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -278,19 +204,19 @@ async fn main() -> Result<()> {
             )",
             [],
         )?;
-    }
-    {
-        let conn1 = conn1.get()?;
-        conn1.execute(
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS Passwords (
                 id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
                 website TEXT NOT NULL,
                 username_email TEXT NOT NULL,
-                password TEXT NOT NULL CHECK(length(password) <= 3128)
+                password TEXT NOT NULL CHECK(length(password) <= 3128),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, website, username_email)
             )",
             [],
         )?;
-        conn1.execute(
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS FieldPreferences (
                 id INTEGER PRIMARY KEY,
                 website TEXT NOT NULL,
@@ -302,625 +228,336 @@ async fn main() -> Result<()> {
         )?;
     }
 
-    hash_all_databases(&db_paths).await?;
+    hash_all_databases(db_paths).await?;
+    Ok(pool)
+}
 
-    let ui = Arc::new(LoginWindow::new()?);
-    let black_square_window = Arc::new(BlackSquareWindow::new()?);
-    let db_paths_for_closure = db_paths.clone(); // First clone for the first closure
-
-    // Login handler
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
-    ui.on_login_clicked({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
-            let password = ui.get_password().to_string();
-
-            if username.is_empty() || password.is_empty() {
-                ui.set_message(SharedString::from("Please enter a username and password."));
-                return;
-            }
-
-            let conn_clone = Arc::clone(&conn_clone);
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let ui_handle = ui.as_weak();
-            let black_square_window_handle = black_square_window_handle.clone();
-
-            slint::spawn_local(async move {
-                let result = check_login(
-                    &conn_clone,
-                    &conn1_clone,
-                    &username,
-                    &password,
-                    ui_handle.clone(),
-                    black_square_window_handle.clone(),
-                )
-                .await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(true) => {
-                                ui.set_message(SharedString::from("Login successful!"));
-                                ui.set_username(SharedString::from(""));
-                                ui.set_password(SharedString::from(""));
-                                ui.hide().unwrap();
-                            }
-                            Ok(false) => {
-                                ui.set_message(SharedString::from("Invalid username or password."));
-                            }
-                            Err(e) => {
-                                ui.set_message(SharedString::from(format!("Login error: {}", e)));
-                            }
+fn spawn_ui_update_handler(weak_window: Weak<BlackSquareWindow>, mut ui_receiver: Receiver<UiUpdate>) {
+    tokio::spawn(async move {
+        while let Some(update) = ui_receiver.recv().await {
+            let weak = weak_window.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(window) = weak.upgrade() {
+                    match update {
+                        UiUpdate::AddPasswordSuccess(passwords) => {
+                            window.set_message("✅ Password added successfully!".into());
+                            window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                         }
+                        UiUpdate::Error(msg) => window.set_message(format!("❌ {}", msg).into()),
                     }
-                })
-                .unwrap();
-            })
-            .unwrap();
+                }
+            }).expect("Failed to invoke from event loop");
         }
     });
+}
 
-    // Forgot password handler
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    let black_square_window_handle = black_square_window.as_weak();
-    ui.on_forgot_password({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
+fn setup_login_handler(
+    ui: &Arc<LoginWindow>,
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+    black_square_window: &Arc<BlackSquareWindow>,
+) {
+    let ui_weak = ui.as_weak();
+    let conn = Arc::clone(conn);
+    let black_weak = black_square_window.as_weak();
 
-            if username.is_empty() {
-                ui.set_message(SharedString::from(
-                    "Please enter your username before recovering your password.",
-                ));
-                return;
-            }
+    ui.on_login_clicked(move || {
+        let ui = ui_weak.upgrade().unwrap();
+        let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
+        if username.is_empty() || password.is_empty() {
+            ui.set_message("Please enter a username and password.".into());
+            return;
+        }
 
-            let conn_clone = Arc::clone(&conn_clone);
-            let ui_handle = ui.as_weak();
-            let black_square_window_handle = black_square_window_handle.clone();
+        let conn = Arc::clone(&conn);
+        let ui_weak = ui_weak.clone();
+        let black_weak = black_weak.clone();
 
-            slint::spawn_local(async move {
-                let username_clone = username.clone();
-                let result = forgot_password(&conn_clone, &username_clone, black_square_window_handle.clone()).await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                ui.set_message(SharedString::from("Password recovery process started."));
-                                ui.hide().unwrap();
-                            }
-                            Err(e) => {
-                                ui.set_message(SharedString::from(format!("Password recovery error: {}", e)));
+        slint::spawn_local(async move {
+            let result = check_login(&conn, &username, &password, ui_weak.clone(), black_weak.clone()).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    match result {
+                        Ok((true, user_id)) => {
+                            ui.set_message("Login successful!".into());
+                            ui.set_username("".into());
+                            ui.set_password("".into());
+                            ui.hide().unwrap();
+                            if let Some(window) = black_weak.upgrade() {
+                                let (ui_sender, ui_receiver) = channel::<UiUpdate>(100);
+                                let handle = tokio::spawn(start_websocket_server(
+                                    Arc::clone(&conn),
+                                    window.as_weak(),
+                                    ui_sender,
+                                    user_id,
+                                ));
+                                *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
+                                spawn_ui_update_handler(window.as_weak(), ui_receiver);
+                                setup_password_handlers(&Arc::new(window), &conn, user_id);
                             }
                         }
+                        Ok((false, _)) => ui.set_message("Invalid username or password.".into()),
+                        Err(e) => ui.set_message(format!("Login error: {}", e).into()),
                     }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
+                }
+            }).unwrap();
+        }).unwrap();
     });
+}
 
-    // Save password handler
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
+fn setup_forgot_password_handler(
+    ui: &Arc<LoginWindow>,
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+    black_square_window: &Arc<BlackSquareWindow>,
+) {
+    let ui_weak = ui.as_weak();
+    let conn = Arc::clone(conn);
+    let black_weak = black_square_window.as_weak();
+
+    ui.on_forgot_password(move || {
+        let ui = ui_weak.upgrade().unwrap();
+        let username = ui.get_username().to_string();
+        if username.is_empty() {
+            ui.set_message("Please enter your username before recovering your password.".into());
+            return;
+        }
+
+        let conn = Arc::clone(&conn);
+        let ui_weak = ui_weak.clone();
+        let black_weak = black_weak.clone();
+
+        slint::spawn_local(async move {
+            let result = forgot_password(&conn, &username, black_weak).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    match result {
+                        Ok(_) => {
+                            ui.set_message("Password recovery process started.".into());
+                            ui.hide().unwrap();
+                        }
+                        Err(e) => ui.set_message(format!("Password recovery error: {}", e).into()),
+                    }
+                }
+            }).unwrap();
+        }).unwrap();
+    });
+}
+
+fn setup_password_handlers(
+    black_square_window: &Arc<BlackSquareWindow>,
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+    user_id: i32,
+) {
+    let black_weak = black_square_window.as_weak();
+    let conn = Arc::clone(conn);
+
     black_square_window.on_savePassword({
+        let black_weak = black_weak.clone();
+        let conn = Arc::clone(&conn);
+        let user_id = user_id;
         move || {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let website = window.get_selected_website().to_string();
-            let username_email = window.get_selected_username_email().to_string();
-            let password = window.get_selected_password().to_string();
+            let window = black_weak.upgrade().unwrap();
+            let (website, username_email, password) = (
+                window.get_selected_website().to_string(),
+                window.get_selected_username_email().to_string(),
+                window.get_selected_password().to_string(),
+            );
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
-                window.set_message(SharedString::from("All fields are required."));
+                window.set_message("All fields are required.".into());
                 return;
             }
 
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
+            let conn = Arc::clone(&conn);
+            let black_weak = black_weak.clone();
             slint::spawn_local(async move {
                 let result = if window.get_isAddMode() {
-                    add_password(&conn1_clone, &website, &username_email, &password)
+                    add_password(&conn, user_id, &website, &username_email, &password)
                 } else {
-                    let id = window.get_id();
-                    update_password(&conn1_clone, id, &website, &username_email, &password).await
+                    update_password(&conn, window.get_id(), user_id, &website, &username_email, &password).await
                 };
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
+                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
+                    if let Some(window) = black_weak.upgrade() {
                         match result {
                             Ok(_) => {
-                                window.set_message(SharedString::from(if window.get_isAddMode() {
-                                    "Password added successfully!"
-                                } else {
-                                    "Password updated successfully!"
-                                }));
+                                window.set_message(if window.get_isAddMode() { "Password added successfully!" } else { "Password updated successfully!" }.into());
                                 window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                             }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("Error: {}", e)));
-                            }
+                            Err(e) => window.set_message(format!("Error: {}", e).into()),
                         }
                     }
-                })
-                .unwrap();
-            })
-            .unwrap();
+                }).unwrap();
+            }).unwrap();
         }
     });
 
-    // Edit password handler
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
     black_square_window.on_edit({
-        move |id, website, username_email, new_password| {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let website = website.to_string();
-            let username_email = username_email.to_string();
-            let new_password = new_password.to_string();
-
-            if website.is_empty() || username_email.is_empty() || new_password.is_empty() {
-                window.set_message(SharedString::from("All fields must be filled."));
-                return;
-            }
-
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
-            slint::spawn_local(async move {
-                let result = update_password(&conn1_clone, id, &website, &username_email, &new_password).await;
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                window.set_message(SharedString::from("✅ Password updated successfully!"));
-                                window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
-                            }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("❌ Error updating password: {}", e)));
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    // Delete password handler
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
-    black_square_window.on_deletePassword({
-        move |id| {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
-            slint::spawn_local(async move {
-                let result = delete_password(&conn1_clone, id).await;
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                window.set_message(SharedString::from("✅ Password deleted successfully!"));
-                                window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
-                            }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("❌ Error deleting password: {}", e)));
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    // Register handler
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    ui.on_register_clicked({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
-            let password = ui.get_password().to_string();
-
-            if username.is_empty() || password.is_empty() {
-                ui.set_message(SharedString::from("Please enter both username and password."));
-                return;
-            }
-
-            let conn_clone = Arc::clone(&conn_clone);
-            let ui_handle = ui.as_weak();
-            let db_paths = db_paths_for_closure.clone(); // Clone for this closure
-
-            slint::spawn_local(async move {
-                let result = register_user(conn_clone, username, password).await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                ui.set_message(SharedString::from("Registration successful!"));
-                                ui.set_username(SharedString::from(""));
-                                ui.set_password(SharedString::from(""));
-                                slint::spawn_local(async move {
-                                    if hash_all_databases(&db_paths).await.is_err() {
-                                        eprintln!("Failed to hash databases after registration.");
-                                    }
-                                }).unwrap();
-                            }
-                            Err(e) => {
-                                if e.to_string().contains("UNIQUE constraint failed") {
-                                    ui.set_message(SharedString::from(
-                                        "Username already exists. Please choose another.",
-                                    ));
-                                } else if e.to_string().contains("User cancelled file save") {
-                                    ui.set_message(SharedString::from(
-                                        "Registration failed: You must save the master key file.",
-                                    ));
-                                } else {
-                                    ui.set_message(SharedString::from(format!("Registration failed: {}", e)));
-                                }
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    let conn1_clone = Arc::clone(&conn1);
-    tokio::spawn(start_websocket_server(conn1_clone));
-
-    let ui = Arc::new(LoginWindow::new()?);
-    let black_square_window = Arc::new(BlackSquareWindow::new()?);
-    let db_paths_for_closure = db_paths.clone(); // Clone for the second UI setup
-
-    // Login handler (duplicate)
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
-    ui.on_login_clicked({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
-            let password = ui.get_password().to_string();
-
-            if username.is_empty() || password.is_empty() {
-                ui.set_message(SharedString::from("Please enter a username and password."));
-                return;
-            }
-
-            let conn_clone = Arc::clone(&conn_clone);
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let ui_handle = ui.as_weak();
-            let black_square_window_handle = black_square_window_handle.clone();
-
-            slint::spawn_local(async move {
-                let result = check_login(
-                    &conn_clone,
-                    &conn1_clone,
-                    &username,
-                    &password,
-                    ui_handle.clone(),
-                    black_square_window_handle.clone(),
-                )
-                .await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(true) => {
-                                ui.set_message(SharedString::from("Login successful!"));
-                                ui.set_username(SharedString::from(""));
-                                ui.set_password(SharedString::from(""));
-                                ui.hide().unwrap();
-                            }
-                            Ok(false) => {
-                                ui.set_message(SharedString::from("Invalid username or password."));
-                            }
-                            Err(e) => {
-                                ui.set_message(SharedString::from(format!("Login error: {}", e)));
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    // Forgot password handler (duplicate)
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    let black_square_window_handle = black_square_window.as_weak();
-    ui.on_forgot_password({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
-
-            if username.is_empty() {
-                ui.set_message(SharedString::from(
-                    "Please enter your username before recovering your password.",
-                ));
-                return;
-            }
-
-            let conn_clone = Arc::clone(&conn_clone);
-            let ui_handle = ui.as_weak();
-            let black_square_window_handle = black_square_window_handle.clone();
-
-            slint::spawn_local(async move {
-                let username_clone = username.clone();
-                let result = forgot_password(&conn_clone, &username_clone, black_square_window_handle.clone()).await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                ui.set_message(SharedString::from("Password recovery process started."));
-                                ui.hide().unwrap();
-                            }
-                            Err(e) => {
-                                ui.set_message(SharedString::from(format!("Password recovery error: {}", e)));
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    // Save password handler (duplicate)
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
-    black_square_window.on_savePassword({
-        move || {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let website = window.get_selected_website().to_string();
-            let username_email = window.get_selected_username_email().to_string();
-            let password = window.get_selected_password().to_string();
-
-
+        let black_weak = black_weak.clone();
+        let conn = Arc::clone(&conn);
+        let user_id = user_id;
+        move |id, website, username_email, password| {
+            let window = black_weak.upgrade().unwrap();
+            let (website, username_email, password) = (website.to_string(), username_email.to_string(), password.to_string());
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
-                window.set_message(SharedString::from("All fields are required."));
+                window.set_message("All fields must be filled.".into());
                 return;
             }
 
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
+            let conn = Arc::clone(&conn);
+            let black_weak = black_weak.clone();
             slint::spawn_local(async move {
-                let result = if window.get_isAddMode() {
-                    add_password(&conn1_clone, &website, &username_email, &password)
-                } else {
-                    let id = window.get_id();
-                    update_password(&conn1_clone, id, &website, &username_email, &password).await
-                };
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
+                let result = update_password(&conn, id, user_id, &website, &username_email, &password).await;
+                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
+                    if let Some(window) = black_weak.upgrade() {
                         match result {
                             Ok(_) => {
-                                window.set_message(SharedString::from(if window.get_isAddMode() {
-                                    "Password added successfully!"
-                                } else {
-                                    "Password updated successfully!"
-                                }));
+                                window.set_message("✅ Password updated successfully!".into());
                                 window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                             }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("Error: {}", e)));
-                            }
+                            Err(e) => window.set_message(format!("❌ Error updating password: {}", e).into()),
                         }
                     }
-                })
-                .unwrap();
-            })
-            .unwrap();
+                }).unwrap();
+            }).unwrap();
         }
     });
 
-    // Edit password handler (duplicate)
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
-    black_square_window.on_edit({
-        move |id, website, username_email, new_password| {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let website = website.to_string();
-            let username_email = username_email.to_string();
-            let new_password = new_password.to_string();
-
-            if website.is_empty() || username_email.is_empty() || new_password.is_empty() {
-                window.set_message(SharedString::from("All fields must be filled."));
-                return;
-            }
-
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
-            slint::spawn_local(async move {
-                let result = update_password(&conn1_clone, id, &website, &username_email, &new_password).await;
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                window.set_message(SharedString::from("✅ Password updated successfully!"));
-                                window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
-                            }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("❌ Error updating password: {}", e)));
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
-        }
-    });
-
-    // Delete password handler (duplicate)
-    let conn1_clone = Arc::clone(&conn1);
-    let black_square_window_handle = black_square_window.as_weak();
     black_square_window.on_deletePassword({
+        let black_weak = black_weak.clone();
+        let conn = Arc::clone(&conn);
+        let user_id = user_id;
         move |id| {
-            let window = black_square_window_handle.upgrade().unwrap();
-            let conn1_clone = Arc::clone(&conn1_clone);
-            let window_handle = window.as_weak();
-
+            let conn = Arc::clone(&conn);
+            let black_weak = black_weak.clone();
             slint::spawn_local(async move {
-                let result = delete_password(&conn1_clone, id).await;
-                let passwords = read_stored_passwords(&conn1_clone).await.unwrap_or_default();
-
+                let result = delete_password(&conn, id, user_id).await;
+                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
-                    if let Some(window) = window_handle.upgrade() {
+                    if let Some(window) = black_weak.upgrade() {
                         match result {
                             Ok(_) => {
-                                window.set_message(SharedString::from("✅ Password deleted successfully!"));
+                                window.set_message("✅ Password deleted successfully!".into());
                                 window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                             }
-                            Err(e) => {
-                                window.set_message(SharedString::from(format!("❌ Error deleting password: {}", e)));
-                            }
+                            Err(e) => window.set_message(format!("❌ Error deleting password: {}", e).into()),
                         }
                     }
-                })
-                .unwrap();
-            })
-            .unwrap();
+                }).unwrap();
+            }).unwrap();
         }
     });
 
-    // Register handler (duplicate)
-    let ui_handle = ui.as_weak();
-    let conn_clone = Arc::clone(&conn);
-    ui.on_register_clicked({
-        move || {
-            let ui = ui_handle.upgrade().unwrap();
-            let username = ui.get_username().to_string();
-            let password = ui.get_password().to_string();
-
-            if username.is_empty() || password.is_empty() {
-                ui.set_message(SharedString::from("Please enter both username and password."));
-                return;
+    black_square_window.on_toggle_autostart({
+        let black_weak = black_weak.clone();
+        move |enabled| {
+            let window = black_weak.upgrade().unwrap();
+            let app_name = "EZPass";
+            let exe_path = std::env::current_exe().unwrap().to_str().unwrap().to_string();
+            if enabled {
+                if let Err(e) = add_to_startup(app_name, &exe_path) {
+                    window.set_message(format!("❌ Failed to enable autostart: {}", e).into());
+                } else {
+                    window.set_message("✅ Autostart enabled".into());
+                }
+            } else {
+                if let Err(e) = remove_from_startup(app_name) {
+                    window.set_message(format!("❌ Failed to disable autostart: {}", e).into());
+                } else {
+                    window.set_message("✅ Autostart disabled".into());
+                }
             }
-
-            let conn_clone = Arc::clone(&conn_clone);
-            let ui_handle = ui.as_weak();
-            let db_paths = db_paths_for_closure.clone(); // Clone for this closure
-
-            slint::spawn_local(async move {
-                let result = register_user(conn_clone, username, password).await;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        match result {
-                            Ok(_) => {
-                                ui.set_message(SharedString::from("Registration successful!"));
-                                ui.set_username(SharedString::from(""));
-                                ui.set_password(SharedString::from(""));
-                                slint::spawn_local(async move {
-                                    if hash_all_databases(&db_paths).await.is_err() {
-                                        eprintln!("Failed to hash databases after registration.");
-                                    }
-                                }).unwrap();
-                            }
-                            Err(e) => {
-                                if e.to_string().contains("UNIQUE constraint failed") {
-                                    ui.set_message(SharedString::from(
-                                        "Username already exists. Please choose another.",
-                                    ));
-                                } else if e.to_string().contains("User cancelled file save") {
-                                    ui.set_message(SharedString::from(
-                                        "Registration failed: You must save the master key file.",
-                                    ));
-                                } else {
-                                    ui.set_message(SharedString::from(format!("Registration failed: {}", e)));
-                                }
-                            }
-                        }
-                    }
-                })
-                .unwrap();
-            })
-            .unwrap();
         }
     });
+}
 
-    ui.show()?;
-    slint::run_event_loop()?;
-    Ok(())
+fn setup_register_handler(
+    ui: &Arc<LoginWindow>,
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+) {
+    let ui_weak = ui.as_weak();
+    let conn = Arc::clone(conn);
+
+    ui.on_register_clicked(move || {
+        let ui = ui_weak.upgrade().unwrap();
+        let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
+        if username.is_empty() || password.is_empty() {
+            ui.set_message("Please enter both username and password.".into());
+            return;
+        }
+
+        let conn = Arc::clone(&conn);
+        let ui_weak = ui_weak.clone();
+        slint::spawn_local(async move {
+            let result = register_user(conn, username, password).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    match result {
+                        Ok(_) => {
+                            ui.set_message("Registration successful!".into());
+                            ui.set_username("".into());
+                            ui.set_password("".into());
+                            slint::spawn_local(async move {
+                                if hash_all_databases(DB_PATHS.as_slice()).await.is_err() {
+                                    eprintln!("Failed to hash databases after registration.");
+                                }
+                            }).unwrap();
+                        }
+                        Err(e) => {
+                            ui.set_message(match e.to_string() {
+                                s if s.contains("UNIQUE constraint failed") => "Username already exists. Please choose another.".into(),
+                                s if s.contains("User cancelled file save") => "Registration failed: You must save the master key file.".into(),
+                                s => format!("Registration failed: {}", s).into(),
+                            });
+                        }
+                    }
+                }
+            }).unwrap();
+        }).unwrap();
+    });
 }
 
 async fn check_login(
     conn: &Arc<Pool<SqliteConnectionManager>>,
-    conn1: &Arc<Pool<SqliteConnectionManager>>,
     username: &str,
     password: &str,
     _ui_handle: Weak<LoginWindow>,
     black_square_window_handle: Weak<BlackSquareWindow>,
-) -> Result<bool> {
-    let conn = conn.get()?;
-    let mut stmt = conn.prepare("SELECT password FROM users WHERE username = ?")?;
-    let mut rows = stmt.query(params![username])?;
-
-    if let Some(row) = rows.next()? {
-        let stored_password: String = row.get(0)?;
-        let parsed_hash = PasswordHash::new(&stored_password)
-            .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
-        let argon2 = Argon2::default();
-
-        if argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok() {
-            let passwords = read_stored_passwords(conn1).await?;
+) -> Result<(bool, i32)> {
+    let conn_inner = conn.get()?;
+    let mut stmt = conn_inner.prepare("SELECT id, password FROM users WHERE username = ?")?;
+    let row: Option<(i32, String)> = stmt.query_row(params![username], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let (user_id, stored_password) = match row {
+        Some((id, password)) => (Some(id), Some(password)),
+        None => (None, None),
+    };
+    if let (Some(id), Some(stored)) = (user_id, stored_password) {
+        let parsed_hash = PasswordHash::new(&stored).map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
+        if Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok() {
+            let passwords = read_stored_passwords(conn, id).await?;
             slint::invoke_from_event_loop(move || {
                 if let Some(window) = black_square_window_handle.upgrade() {
                     window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                     window.show().unwrap();
                 }
             })?;
-            return Ok(true);
+            return Ok((true, id));
         }
     }
-    Ok(false)
+    Ok((false, 0))
 }
 
-async fn read_stored_passwords(conn1: &Arc<Pool<SqliteConnectionManager>>) -> Result<Vec<PasswordEntry>> {
-    let conn1 = conn1.get()?;
-    let mut stmt = conn1.prepare("SELECT id, website, username_email, password FROM Passwords")?;
-    let password_iter = stmt.query_map([], |row| {
+async fn read_stored_passwords(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32) -> Result<Vec<PasswordEntry>> {
+    let conn = conn.get()?;
+    let mut stmt = conn.prepare("SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?1")?;
+    let password_iter = stmt.query_map(params![user_id], |row| {
         Ok(PasswordEntry {
             id: row.get(0)?,
-            website: SharedString::from(row.get::<_, String>(1)?),
-            username_email: SharedString::from(row.get::<_, String>(2)?),
-            password: SharedString::from(row.get::<_, String>(3)?),
+            website: row.get::<_, String>(1)?.into(),
+            username_email: row.get::<_, String>(2)?.into(),
+            password: row.get::<_, String>(3)?.into(),
         })
     })?;
-    let passwords: Vec<_> = password_iter.collect::<Result<_, _>>()?;
-    Ok(passwords)
+    Ok(password_iter.collect::<Result<_, _>>()?)
 }
 
 async fn forgot_password(
@@ -928,35 +565,25 @@ async fn forgot_password(
     username: &str,
     black_square_window_handle: Weak<BlackSquareWindow>,
 ) -> Result<()> {
-    let mut dialog = FileDialog::new();
-    dialog = dialog.set_title("Select your masterkey file");
-
+    let mut dialog = FileDialog::new().set_title("Select your masterkey file");
     if let Some(desktop_dir) = dirs::desktop_dir() {
         dialog = dialog.set_directory(&desktop_dir);
     }
 
-    match dialog.pick_file() {
-        Some(file_path) => {
-            let file_hash = fs::read_to_string(&file_path)?;
-            let conn = conn.get()?;
-            let db_hash: String = conn.query_row(
-                "SELECT hash FROM users WHERE username = ?1",
-                params![username],
-                |row| row.get(0),
-            )?;
+    let file_path = dialog.pick_file().ok_or_else(|| anyhow!("User cancelled file selection"))?;
+    let file_hash = fs::read_to_string(&file_path)?;
+    let conn = conn.get()?;
+    let db_hash: String = conn.query_row("SELECT hash FROM users WHERE username = ?1", params![username], |row| row.get(0))?;
 
-            if file_hash == db_hash {
-                slint::invoke_from_event_loop(move || {
-                    if let Some(window) = black_square_window_handle.upgrade() {
-                        window.show().unwrap();
-                    }
-                })?;
-            } else {
-                return Err(anyhow!("Hash mismatch: Unable to recover password."));
+    if file_hash == db_hash {
+        slint::invoke_from_event_loop(move || {
+            if let Some(window) = black_square_window_handle.upgrade() {
+                window.show().unwrap();
             }
-            Ok(())
-        }
-        None => Err(anyhow!("User cancelled file selection.")),
+        })?;
+        Ok(())
+    } else {
+        Err(anyhow!("Hash mismatch: Unable to recover password"))
     }
 }
 
@@ -981,20 +608,19 @@ async fn register_user(conn: Arc<Pool<SqliteConnectionManager>>, username: Strin
 
 fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = argon2
+    Ok(Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| anyhow!("Failed to hash password: {:?}", e))?;
-    Ok(password_hash.to_string())
+        .map_err(|e| anyhow!(e))?
+        .to_string())
 }
 
 fn generate_random_hash() -> Result<String> {
+    let mut random_bytes = [0u8; 32];
     let mut rng = OsRng;
-    let random_bytes: [u8; 32] = rng.gen();
+    rng.fill_bytes(&mut random_bytes);
     let mut hasher = Sha256::new();
     hasher.update(&random_bytes);
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn export_hash_to_file(hash: &str, file_path: &PathBuf) -> Result<()> {
@@ -1007,17 +633,12 @@ async fn hash_database(file_path: &str) -> Result<String> {
     let mut file = File::open(file_path).await?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 1024];
-
     loop {
         let bytes_read = file.read(&mut buffer).await?;
-        if bytes_read == 0 {
-            break;
-        }
+        if bytes_read == 0 { break; }
         hasher.update(&buffer[..bytes_read]);
     }
-
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn hash_all_databases(db_paths: &[&str]) -> Result<()> {
@@ -1027,53 +648,108 @@ async fn hash_all_databases(db_paths: &[&str]) -> Result<()> {
                 Ok(hash) => println!("{} hash: {}", db_path, hash),
                 Err(e) => eprintln!("Failed to hash {}: {}", db_path, e),
             }
-        } else {
-            println!("{} does not exist", db_path);
         }
     }
     Ok(())
 }
 
-fn add_password(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    website: &str,
-    username_email: &str,
-    password: &str,
-) -> Result<()> {
+fn add_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
     let conn = conn.get()?;
     conn.execute(
-        "INSERT INTO Passwords (website, username_email, password) VALUES (?1, ?2, ?3)",
-        params![website, username_email, password],
+        "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
+        params![user_id, website, username_email, password],
     )?;
     Ok(())
 }
 
-async fn update_password(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    id: i32,
-    selected_website: &str,
-    selected_username_email: &str,
-    selected_password: &str,
-) -> Result<()> {
+async fn update_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
     let conn = conn.get()?;
-    if selected_password.len() > 30 {
-        return Err(anyhow!("Password exceeds 30 characters."));
-    }
     let rows_affected = conn.execute(
-        "UPDATE Passwords SET website = ?1, username_email = ?2, password = ?3 WHERE id = ?4",
-        params![selected_website, selected_username_email, selected_password, id],
+        "UPDATE Passwords SET website = ?1, username_email = ?2, password = ?3 WHERE id = ?4 AND user_id = ?5",
+        params![website, username_email, password, id, user_id],
     )?;
-    if rows_affected == 0 {
-        return Err(anyhow!("No matching record found to update."));
-    }
+    if rows_affected == 0 { return Err(anyhow!("No matching record found to update")); }
     Ok(())
 }
 
-async fn delete_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32) -> Result<()> {
+async fn delete_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32, user_id: i32) -> Result<()> {
     let conn = conn.get()?;
-    let rows_affected = conn.execute("DELETE FROM Passwords WHERE id = ?1", params![id])?;
-    if rows_affected == 0 {
-        return Err(anyhow!("No matching record found to delete."));
+    let rows_affected = conn.execute("DELETE FROM Passwords WHERE id = ?1 AND user_id = ?2", params![id, user_id])?;
+    if rows_affected == 0 { return Err(anyhow!("No matching record found to delete")); }
+    Ok(())
+}
+
+fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_SET_VALUE)?;
+    run_key.set_value(app_name, &app_path)?;
+    Ok(())
+}
+
+fn remove_from_startup(app_name: &str) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_SET_VALUE)?;
+    run_key.delete_value(app_name)?;
+    Ok(())
+}
+
+fn is_in_startup(app_name: &str) -> Result<bool> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")?;
+    Ok(run_key.get_value::<String, _>(app_name).is_ok())
+}
+
+fn handle_logout(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindow>) {
+    if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
+        handle.abort();
     }
+    black_square_window.set_password_entries(ModelRc::new(VecModel::from(vec![])));
+    ui.set_message("".into()); // Clear the message
+    ui.show().unwrap();
+    black_square_window.hide().unwrap();
+}
+
+static DB_PATHS: [&str; 1] = ["app.db"];
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let conn = setup_databases(DB_PATHS.as_slice()).await?;
+
+    let ui = Arc::new(LoginWindow::new()?);
+    let black_square_window = Arc::new(BlackSquareWindow::new()?);
+
+    let ui_clone = Arc::clone(&ui);
+    let black_clone = Arc::clone(&black_square_window);
+
+    // Set logout button handler
+    black_square_window.on_logout({
+        let ui_clone = ui_clone.clone();
+        let black_clone = black_clone.clone();
+        move || {
+            handle_logout(ui_clone.clone(), black_clone.clone());
+        }
+    });
+
+
+    setup_login_handler(&ui, &conn, &black_square_window);
+    setup_forgot_password_handler(&ui, &conn, &black_square_window);
+    setup_register_handler(&ui, &conn);
+
+    // Set initial autostart state
+    let app_name = "EZPass";
+    let app_path = std::env::current_exe()?.to_str().ok_or_else(|| anyhow!("Failed to get executable path"))?.to_string();
+    if let Ok(is_enabled) = is_in_startup(app_name) {
+        black_square_window.set_autostart_enabled(is_enabled);
+    } else {
+        if let Err(e) = add_to_startup(app_name, &app_path) {
+            eprintln!("Failed to add to startup on first run: {}", e);
+        } else {
+            black_square_window.set_autostart_enabled(true);
+            println!("Added EZPass to startup with icon on first run");
+        }
+    }
+
+    ui.show()?;
+    slint::run_event_loop()?;
     Ok(())
 }
