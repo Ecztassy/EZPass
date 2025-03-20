@@ -244,6 +244,8 @@ export component BlackSquareWindow inherits Window {
     in-out property <bool> autostart_enabled;
     callback toggle_autostart(bool); // Callback to notify Rust of the change
     callback logout();
+    callback export_database();
+    callback import_database();
 
     Rectangle {
         background: black;

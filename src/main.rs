@@ -24,8 +24,11 @@ use winreg::RegKey;
 use winreg::enums::*;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use simple_crypt::{encrypt, decrypt};
+use hex; // Added for key encoding
 
 static WEBSOCKET_TASK: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
+static ENCRYPTION_KEY: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
 
 slint::include_modules!();
 
@@ -126,7 +129,8 @@ async fn process_websocket_message(
                     let conn_clone = Arc::clone(conn);
                     let ui_sender_clone = ui_sender.clone();
                     tokio::spawn(async move {
-                        let passwords = read_stored_passwords(&conn_clone, user_id).await.unwrap_or_default();
+                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                        let passwords = read_stored_passwords(&conn_clone, user_id, key).await.unwrap_or_default();
                         let _ = ui_sender_clone.send(UiUpdate::AddPasswordSuccess(passwords)).await;
                     });
                     WebSocketResponse { password: Some(parts[2].to_string()), username_email: Some(parts[1].to_string()), preferences: Vec::new(), error: None }
@@ -152,11 +156,13 @@ fn retrieve_password_and_prefs(conn: &Arc<Pool<SqliteConnectionManager>>, user_i
     let db_conn = conn.get()?;
     let mut stmt = db_conn.prepare("SELECT password, username_email FROM Passwords WHERE user_id = ?1 AND website = ?2")?;
     let mut rows = stmt.query(params![user_id, website])?;
-    let (password, username_email) = if let Some(row) = rows.next()? {
+    let (encrypted_password, username_email) = if let Some(row) = rows.next()? {
         (Some(row.get(0)?), Some(row.get(1)?))
     } else {
         (None, None)
     };
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let password = encrypted_password.map(|ep: Vec<u8>| decrypt_password(&ep, &key).unwrap_or("Decryption failed".to_string()));
     let prefs = get_field_preferences(conn, website)?;
     Ok((password, username_email, prefs))
 }
@@ -186,13 +192,22 @@ fn retrieve_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, we
     let conn = conn.get()?;
     let mut stmt = conn.prepare("SELECT password FROM Passwords WHERE user_id = ?1 AND website = ?2")?;
     let mut rows = stmt.query(params![user_id, website])?;
-    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+    let row = rows.next()?;
+    let encrypted_password = match row {
+        Some(r) => Some(r.get::<_, Vec<u8>>(0)?),
+        None => None,
+    };
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let password = encrypted_password.map(|ep| decrypt_password(&ep, &key).unwrap_or("Decryption failed".to_string()));
+    Ok(password)
 }
 
 async fn setup_databases(db_paths: &[&str]) -> Result<Arc<Pool<SqliteConnectionManager>>> {
     hash_all_databases(db_paths).await?;
-    let pool = Arc::new(Pool::builder().max_size(15).build(SqliteConnectionManager::file(db_paths[0]))?);
+    let manager = SqliteConnectionManager::file(db_paths[0]); // Initially unencrypted
+    let pool = Arc::new(Pool::builder().max_size(15).build(manager)?);
 
+    // Create tables (initially unencrypted; will be rekeyed after first registration)
     {
         let conn = pool.get()?;
         conn.execute(
@@ -200,6 +215,7 @@ async fn setup_databases(db_paths: &[&str]) -> Result<Arc<Pool<SqliteConnectionM
                 id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 password TEXT NOT NULL CHECK(length(password) <= 128),
+                salt TEXT NOT NULL,
                 hash TEXT NOT NULL
             )",
             [],
@@ -210,7 +226,7 @@ async fn setup_databases(db_paths: &[&str]) -> Result<Arc<Pool<SqliteConnectionM
                 user_id INTEGER NOT NULL,
                 website TEXT NOT NULL,
                 username_email TEXT NOT NULL,
-                password TEXT NOT NULL CHECK(length(password) <= 3128),
+                password BLOB NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 UNIQUE(user_id, website, username_email)
             )",
@@ -374,7 +390,8 @@ fn setup_password_handlers(
                 } else {
                     update_password(&conn, window.get_id(), user_id, &website, &username_email, &password).await
                 };
-                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
+                let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
                     if let Some(window) = black_weak.upgrade() {
                         match result {
@@ -406,7 +423,8 @@ fn setup_password_handlers(
             let black_weak = black_weak.clone();
             slint::spawn_local(async move {
                 let result = update_password(&conn, id, user_id, &website, &username_email, &password).await;
-                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
+                let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
                     if let Some(window) = black_weak.upgrade() {
                         match result {
@@ -431,7 +449,8 @@ fn setup_password_handlers(
             let black_weak = black_weak.clone();
             slint::spawn_local(async move {
                 let result = delete_password(&conn, id, user_id).await;
-                let passwords = read_stored_passwords(&conn, user_id).await.unwrap_or_default();
+                let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
                 slint::invoke_from_event_loop(move || {
                     if let Some(window) = black_weak.upgrade() {
                         match result {
@@ -466,6 +485,50 @@ fn setup_password_handlers(
                     window.set_message("✅ Autostart disabled".into());
                 }
             }
+        }
+    });
+
+    black_square_window.on_export_database({
+        let black_weak = black_weak.clone();
+        move || {
+            let window = black_weak.upgrade().unwrap();
+            let file_path = FileDialog::new()
+                .set_file_name("passwords.db")
+                .save_file()
+                .ok_or_else(|| anyhow!("User cancelled export"))
+                .unwrap();
+            if let Err(e) = fs::copy(DB_PATHS[0], &file_path) {
+                window.set_message(format!("❌ Export failed: {}", e).into());
+            } else {
+                window.set_message("✅ Database exported successfully!".into());
+            }
+        }
+    });
+
+    black_square_window.on_import_database({
+        let black_weak = black_weak.clone();
+        let conn = Arc::clone(&conn);
+        let user_id = user_id;
+        move || {
+            let file_path = FileDialog::new()
+                .set_title("Select a database to import")
+                .pick_file()
+                .ok_or_else(|| anyhow!("User cancelled import"))
+                .unwrap();
+
+            let conn = Arc::clone(&conn);
+            let black_weak = black_weak.clone();
+            slint::spawn_local(async move {
+                let result = import_database(&conn, &file_path, user_id, black_weak.clone()).await;
+                slint::invoke_from_event_loop(move || {
+                    if let Some(window) = black_weak.upgrade() {
+                        match result {
+                            Ok(_) => window.set_message("✅ Database imported successfully!".into()),
+                            Err(e) => window.set_message(format!("❌ Import failed: {}", e).into()),
+                        }
+                    }
+                }).unwrap();
+            }).unwrap();
         }
     });
 }
@@ -517,45 +580,66 @@ fn setup_register_handler(
 }
 
 async fn check_login(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
+    conn: &Arc<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>,
     username: &str,
     password: &str,
     _ui_handle: Weak<LoginWindow>,
     black_square_window_handle: Weak<BlackSquareWindow>,
 ) -> Result<(bool, i32)> {
     let conn_inner = conn.get()?;
-    let mut stmt = conn_inner.prepare("SELECT id, password FROM users WHERE username = ?")?;
-    let row: Option<(i32, String)> = stmt.query_row(params![username], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-    let (user_id, stored_password) = match row {
-        Some((id, password)) => (Some(id), Some(password)),
-        None => (None, None),
-    };
-    if let (Some(id), Some(stored)) = (user_id, stored_password) {
-        let parsed_hash = PasswordHash::new(&stored).map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
+    let mut stmt = conn_inner.prepare("SELECT id, password, salt FROM users WHERE username = ?")?;
+    let row: Option<(i32, String, String)> = stmt.query_row(params![username], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    }).optional()?;
+    
+    if let Some((user_id, stored_password, salt)) = row {
+        let parsed_hash = PasswordHash::new(&stored_password)
+            .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
         if Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok() {
-            let passwords = read_stored_passwords(conn, id).await?;
+            let key = derive_key(password, &salt)?;
+            let hex_key = hex::encode(&key);
+            println!("Setting key (hex): {}", hex_key); // Debug log
+            conn_inner.execute(&format!("PRAGMA key = '{}';", hex_key), [])?;
+            *ENCRYPTION_KEY.lock().unwrap() = Some(key.clone());
+            println!("Encryption key set: {:x?}", key); // Debug log
+            let passwords = read_stored_passwords(conn, user_id, key.clone()).await?;
             slint::invoke_from_event_loop(move || {
                 if let Some(window) = black_square_window_handle.upgrade() {
                     window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                     window.show().unwrap();
                 }
             })?;
-            return Ok((true, id));
+            return Ok((true, user_id));
         }
     }
     Ok((false, 0))
 }
 
-async fn read_stored_passwords(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32) -> Result<Vec<PasswordEntry>> {
+async fn read_stored_passwords(conn: &Arc<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>, user_id: i32, key: Vec<u8>) -> Result<Vec<PasswordEntry>> {
     let conn = conn.get()?;
     let mut stmt = conn.prepare("SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?1")?;
     let password_iter = stmt.query_map(params![user_id], |row| {
-        Ok(PasswordEntry {
-            id: row.get(0)?,
-            website: row.get::<_, String>(1)?.into(),
-            username_email: row.get::<_, String>(2)?.into(),
-            password: row.get::<_, String>(3)?.into(),
-        })
+        let id: i32 = row.get(0)?;
+        let website: String = row.get(1)?;
+        let username_email: String = row.get(2)?;
+        let encrypted_password: Vec<u8> = row.get(3)?;
+        match decrypt_password(&encrypted_password, &key) {
+            Ok(password) => Ok(PasswordEntry {
+                id,
+                website: website.into(),
+                username_email: username_email.into(),
+                password: password.into(),
+            }),
+            Err(e) => {
+                println!("Decryption error for password ID {}: {}", id, e); // Debug log
+                Ok(PasswordEntry {
+                    id,
+                    website: website.into(),
+                    username_email: username_email.into(),
+                    password: format!("Decryption failed: {}", e).into(),
+                })
+            }
+        }
     })?;
     Ok(password_iter.collect::<Result<_, _>>()?)
 }
@@ -588,8 +672,11 @@ async fn forgot_password(
 }
 
 async fn register_user(conn: Arc<Pool<SqliteConnectionManager>>, username: String, password: String) -> Result<()> {
-    let hashed_password = hash_password(&password)?;
+    let salt = SaltString::generate(&mut OsRng);
+    let hashed_password = hash_password(&password, &salt)?;
     let random_hash = generate_random_hash()?;
+    let key = derive_key(&password, &salt.to_string())?;
+    let hex_key = hex::encode(&key);
 
     let file_path = tokio::task::spawn_blocking(|| {
         FileDialog::new().set_file_name("masterkey.txt").save_file()
@@ -599,17 +686,18 @@ async fn register_user(conn: Arc<Pool<SqliteConnectionManager>>, username: Strin
     export_hash_to_file(&random_hash, &file_path).await?;
 
     let conn = conn.get()?;
+    conn.execute(&format!("PRAGMA rekey = '{}';", hex_key), [])?; // Rekey the database
     conn.execute(
-        "INSERT INTO users (username, password, hash) VALUES (?1, ?2, ?3)",
-        params![username, hashed_password, random_hash],
+        "INSERT INTO users (username, password, salt, hash) VALUES (?1, ?2, ?3, ?4)",
+        params![username, hashed_password, salt.to_string(), random_hash],
     )?;
+    *ENCRYPTION_KEY.lock().unwrap() = Some(key);
     Ok(())
 }
 
-fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+fn hash_password(password: &str, salt: &SaltString) -> Result<String> {
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes(), salt)
         .map_err(|e| anyhow!(e))?
         .to_string())
 }
@@ -618,7 +706,7 @@ fn generate_random_hash() -> Result<String> {
     let mut random_bytes = [0u8; 32];
     let mut rng = OsRng;
     rng.fill_bytes(&mut random_bytes);
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256::default();
     hasher.update(&random_bytes);
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -631,7 +719,7 @@ async fn export_hash_to_file(hash: &str, file_path: &PathBuf) -> Result<()> {
 
 async fn hash_database(file_path: &str) -> Result<String> {
     let mut file = File::open(file_path).await?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256::default();
     let mut buffer = [0; 1024];
     loop {
         let bytes_read = file.read(&mut buffer).await?;
@@ -653,20 +741,25 @@ async fn hash_all_databases(db_paths: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn add_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
+fn add_password(conn: &Arc<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let encrypted_password = encrypt_password(password, &key)?;
     let conn = conn.get()?;
     conn.execute(
         "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
-        params![user_id, website, username_email, password],
+        params![user_id, website, username_email, encrypted_password],
     )?;
+    println!("Password added for user_id: {}, website: {}", user_id, website); // Debug log
     Ok(())
 }
 
 async fn update_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let encrypted_password = encrypt_password(password, &key)?;
     let conn = conn.get()?;
     let rows_affected = conn.execute(
         "UPDATE Passwords SET website = ?1, username_email = ?2, password = ?3 WHERE id = ?4 AND user_id = ?5",
-        params![website, username_email, password, id, user_id],
+        params![website, username_email, encrypted_password, id, user_id],
     )?;
     if rows_affected == 0 { return Err(anyhow!("No matching record found to update")); }
     Ok(())
@@ -703,10 +796,86 @@ fn handle_logout(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindo
     if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
         handle.abort();
     }
+    *ENCRYPTION_KEY.lock().unwrap() = None; // Clear the encryption key
     black_square_window.set_password_entries(ModelRc::new(VecModel::from(vec![])));
-    ui.set_message("".into()); // Clear the message
+    ui.set_message("".into());
     ui.show().unwrap();
     black_square_window.hide().unwrap();
+}
+
+fn derive_key(password: &str, salt: &str) -> Result<Vec<u8>> {
+    let salt = argon2::password_hash::SaltString::from_b64(salt)
+        .map_err(|e| anyhow!("Invalid salt: {}", e))?;
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow!("Password hashing failed: {}", e))?;
+    let key = password_hash.hash.ok_or_else(|| anyhow!("No hash output"))?.as_bytes().to_vec();
+    Ok(key)
+}
+
+fn encrypt_password(plaintext: &str, key: &[u8]) -> Result<Vec<u8>> {
+    encrypt(plaintext.as_bytes(), key)
+        .map_err(|e| anyhow!("Encryption failed: {}", e))
+}
+
+fn decrypt_password(encrypted_data: &[u8], key: &[u8]) -> Result<String> {
+    let plaintext = decrypt(encrypted_data, key)
+        .map_err(|e| anyhow!("Decryption failed: {}", e))?;
+    String::from_utf8(plaintext)
+        .map_err(|e| anyhow!("Invalid UTF-8 in decrypted data: {}", e))
+}
+
+async fn import_database(
+    conn: &Arc<Pool<SqliteConnectionManager>>,
+    file_path: &PathBuf,
+    current_user_id: i32,
+    black_square_window_handle: Weak<BlackSquareWindow>,
+) -> Result<()> {
+    let imported_pool = Pool::builder().max_size(1).build(SqliteConnectionManager::file(file_path))?;
+    let imported_conn = imported_pool.get()?;
+    
+    let mut stmt = imported_conn.prepare("SELECT username, password, salt FROM users LIMIT 1")?;
+    let (username, stored_password, salt): (String, String, String) = stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+
+    let dialog = FileDialog::new().set_title(&format!("Enter master password for user '{}'", username));
+    let master_password = dialog
+        .pick_file()
+        .map(|_| "Temporary workaround: Assuming password entered via UI".to_string())
+        .unwrap_or("".to_string()); // Placeholder; real app needs proper password input
+
+    let parsed_hash = PasswordHash::new(&stored_password).map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
+    if Argon2::default().verify_password(master_password.as_bytes(), &parsed_hash).is_ok() {
+        let key = derive_key(&master_password, &salt)?;
+        let hex_key = hex::encode(&key);
+        imported_conn.execute(&format!("PRAGMA key = '{}';", hex_key), [])?;
+        *ENCRYPTION_KEY.lock().unwrap() = Some(key);
+
+        let mut stmt = imported_conn.prepare("SELECT user_id, website, username_email, password FROM Passwords")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+
+        let current_conn = conn.get()?;
+        for row in rows {
+            let (_user_id, website, username_email, encrypted_password): (i32, String, String, Vec<u8>) = row?;
+            current_conn.execute(
+                "INSERT OR IGNORE INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
+                params![current_user_id, website, username_email, encrypted_password],
+            )?;
+        }
+
+        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+        let passwords = read_stored_passwords(conn, current_user_id, key).await?;
+        slint::invoke_from_event_loop(move || {
+            if let Some(window) = black_square_window_handle.upgrade() {
+                window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+            }
+        })?;
+        Ok(())
+    } else {
+        Err(anyhow!("Incorrect master password for imported database"))
+    }
 }
 
 static DB_PATHS: [&str; 1] = ["app.db"];
@@ -721,7 +890,6 @@ async fn main() -> Result<()> {
     let ui_clone = Arc::clone(&ui);
     let black_clone = Arc::clone(&black_square_window);
 
-    // Set logout button handler
     black_square_window.on_logout({
         let ui_clone = ui_clone.clone();
         let black_clone = black_clone.clone();
@@ -730,12 +898,10 @@ async fn main() -> Result<()> {
         }
     });
 
-
     setup_login_handler(&ui, &conn, &black_square_window);
     setup_forgot_password_handler(&ui, &conn, &black_square_window);
     setup_register_handler(&ui, &conn);
 
-    // Set initial autostart state
     let app_name = "EZPass";
     let app_path = std::env::current_exe()?.to_str().ok_or_else(|| anyhow!("Failed to get executable path"))?.to_string();
     if let Ok(is_enabled) = is_in_startup(app_name) {
