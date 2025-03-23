@@ -1,4 +1,5 @@
 name: Build Cross-Platform
+
 on: [push]
 
 jobs:
@@ -22,7 +23,10 @@ jobs:
             binary: EZPass
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         run: |
@@ -30,22 +34,22 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_ENV
         shell: bash
 
-      - name: Install Ubuntu dependencies
+      - name: Install Ubuntu Dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
 
-      - name: Install Windows dependencies
+      - name: Install Windows Dependencies
         if: ${{ matrix.os == 'windows-latest' }}
         run: vcpkg install openssl:x64-windows
 
-      - name: Add target
+      - name: Add Rust Target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Build
+      - name: Build Project
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3.1.3
         with:
           name: EZPass-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
