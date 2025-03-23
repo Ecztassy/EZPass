@@ -2,12 +2,9 @@
 name = "EZPass"
 version = "0.1.0"
 edition = "2021"
-<<<<<<< HEAD
-=======
 description = "Secure password manager built with rust."
 authors = ["XTassy"]
 homepage = "https://ezpassprogram.vercel.app/"
->>>>>>> bd9a5f0 (final version)
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,11 +16,7 @@ anyhow = "1.0.97"
 sha2 = "0.10.8"
 rfd = "0.15.3"
 diesel ="2.2.8"
-<<<<<<< HEAD
-slint = { version = "=1.10.0", default-features = false, features = [
-=======
 slint = { version = "1.10.0", default-features = false, features = [
->>>>>>> bd9a5f0 (final version)
     "std",
     "renderer-skia",
     "backend-winit",
@@ -53,17 +46,11 @@ embed-resource = "3.0.2"
 aes-gcm = "0.10.3"
 hex = "0.4.3"
 simple_crypt = "0.2.3"
-<<<<<<< HEAD
-
-
-
-=======
 tokio-macros = "2.5.0"
-tray-icon = "0.20.0"
+
 
 [package.metadata.wix]
 eula = false
->>>>>>> bd9a5f0 (final version)
 
 
 [build-dependencies]
