@@ -1,18 +1,5 @@
 import { Button, LineEdit, ScrollView, Switch } from "std-widgets.slint";
 
-<<<<<<< HEAD
-// StyledButton Component
-component StyledButton inherits Button {
-    height: 40px;
-    primary: true;
-}
-
-// StyledButton1 Component
-component StyledButton1 inherits Rectangle {
-    in-out property <string> text <=> txt.text;
-    callback clicked <=> touch.clicked;
-
-=======
 // Reusable StyledButton with configurable properties
 component StyledButton inherits Button {
     in property <string> button-text: "Button";
@@ -24,7 +11,6 @@ component StyledButton inherits Button {
 component StyledButton1 inherits Rectangle {
     in-out property <string> text;
     callback clicked;
->>>>>>> bd9a5f0 (final version)
     border-radius: self.height / 2;
     border-width: 1px;
     border-color: self.background.darker(25%);
@@ -37,14 +23,9 @@ component StyledButton1 inherits Rectangle {
         y: (parent.height - self.height) / 2 + (touch.pressed ? 1px : 0);
         color: touch.pressed ? #ffffff : #eeeeee;
         font-size: 16px;
-<<<<<<< HEAD
-    }
-    touch := TouchArea { }
-=======
         text: root.text;
     }
     touch := TouchArea { clicked => { root.clicked(); } }
->>>>>>> bd9a5f0 (final version)
 }
 
 // PasswordEntry Struct
@@ -55,112 +36,30 @@ export struct PasswordEntry {
     password: string,
 }
 
-<<<<<<< HEAD
-// LoginWindow Component (Unchanged)
-export component LoginWindow inherits Window {
-    title: "EzPass";
-    icon: @image-url("icon/icon.png");
-    width: 600px;
-    height: 430px;
-=======
 // LoginWindow Component
 export component LoginWindow inherits Window {
     title: "EzPass";
     icon: @image-url("icon/icon.png");
     min-width: 600px;
     min-height: 500px;
->>>>>>> bd9a5f0 (final version)
     in-out property <string> username;
     in-out property <string> password;
     in-out property <string> message;
     callback login-clicked();
     callback register-clicked();
     callback forgot_password();
-<<<<<<< HEAD
-    default-font-size: 0cm;
-
-    Rectangle {
-        background: black;
-        width: 100%;
-        height: 100%;
-
-=======
     callback importeddb();
     in-out property <bool> is_visible: true;
     in-out property <string> database_name;
 
     Rectangle {
         background: black;
->>>>>>> bd9a5f0 (final version)
         VerticalLayout {
             padding: 20px;
             spacing: 15px;
 
             HorizontalLayout {
                 alignment: center;
-<<<<<<< HEAD
-                spacing: 0px;
-
-                Image {
-                    source: @image-url("icon/icon.png");
-                    width: 80px;
-                    height: 80px;
-                    vertical-alignment: center;
-                }
-
-                Text {
-                    text: "EZPass";
-                    vertical-alignment: center;
-                    font-size: 40px;
-                    font-italic: false;
-                }
-            }
-
-            LineEdit {
-                height: 40px;
-                placeholder-text: "User";
-                font-size: 16px;
-                text <=> root.username;
-            }
-
-            LineEdit {
-                height: 40px;
-                placeholder-text: "Palavra-Passe";
-                font-size: 16px;
-                input-type: InputType.password;
-                text <=> root.password;
-            }
-
-            StyledButton {
-                text: "Login";
-                clicked => { root.login-clicked(); }
-            }
-
-            StyledButton {
-                text: "Registro";
-                clicked => { root.register-clicked(); }
-            }
-
-            Text {
-                text: root.message;
-                font-size: 16px;
-                color: #dc3545;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-
-            HorizontalLayout {
-                alignment: center;
-                spacing: 0px;
-                padding-bottom: 10px;
-                StyledButton1 {
-                    text: "Esqueceu-se da password?";
-                    clicked => { 
-                        root.forgot_password(); 
-                    }
-                }
-            }
-=======
                 Image { source: @image-url("icon/icon.png"); width: 80px; height: 80px; }
                 Text { text: "EZPass"; font-size: 40px; }
             }
@@ -194,16 +93,11 @@ export component LoginWindow inherits Window {
                 padding-bottom: 10px;
                 StyledButton1 { text: "Importar DB"; clicked => { root.importeddb(); } }
             }
->>>>>>> bd9a5f0 (final version)
         }
     }
 }
 
-<<<<<<< HEAD
-// PasswordCard Component (Fixed)
-=======
 // Optimized PasswordCard
->>>>>>> bd9a5f0 (final version)
 component PasswordCard inherits Rectangle {
     in-out property <int> id: 1;
     in property <string> website;
@@ -212,49 +106,14 @@ component PasswordCard inherits Rectangle {
     callback edit-clicked(int);
     callback delete-clicked(int);
 
-<<<<<<< HEAD
-    width: 100%;
-    height: 200px;
-    background: #3a3a3a;
-    border-radius: 8px;
-=======
     background: #3a3a3a;
     border-radius: 8px;
     width: 100%;
     height: 200px;
->>>>>>> bd9a5f0 (final version)
 
     VerticalLayout {
         padding: 10px;
         spacing: 5px;
-<<<<<<< HEAD
-        
-
-
-        Text {
-            text: root.website;
-            color: white;
-            font-size: parent.spacing * 3;
-            wrap: word-wrap;
-        }
-
-        Text {
-            text: root.username_email;
-            color: #cccccc;
-            font-size: parent.spacing * 3;
-            wrap: word-wrap;
-        }
-
-        LineEdit {
-            text: root.password;
-            font-size: parent.spacing * 3;
-            height: 40px;
-            padding: 5px;
-            input-type: InputType.password;
-            read-only: true;
-        }
-
-=======
 
         Text { text: root.website; color: white; font-size: 15px; wrap: word-wrap; }
         Text { text: root.username_email; color: #cccccc; font-size: 15px; wrap: word-wrap; }
@@ -266,50 +125,10 @@ component PasswordCard inherits Rectangle {
             input-type: InputType.password; 
             read-only: true; 
         }
->>>>>>> bd9a5f0 (final version)
         HorizontalLayout {
             alignment: end;
             spacing: 5px;
 
-<<<<<<< HEAD
-            TouchArea {
-                width: 24px;
-                height: 24px;
-                clicked => { root.edit-clicked(root.id); }
-                Rectangle {
-                    width: 100%;
-                    height: 100%;
-                    background: #555555;
-                    border-radius: 4px;
-
-                    Text {
-                        text: "✎";
-                        color: white;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            TouchArea {
-                width: 24px;
-                height: 24px;
-                clicked => { root.delete-clicked(root.id); }
-                Rectangle {
-                    width: 100%;
-                    height: 100%;
-                    background: #555555;
-                    border-radius: 4px;
-
-                    Text {
-                        text: "🗑";
-                        color: white;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-=======
             for icon[idx] in ["✎", "🗑"] : TouchArea {
                 width: 24px;
                 height: 24px;
@@ -319,55 +138,25 @@ component PasswordCard inherits Rectangle {
                     background: #555555;
                     border-radius: 4px;
                     Text { text: icon; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
->>>>>>> bd9a5f0 (final version)
                 }
             }
         }
     }
 }
 
-<<<<<<< HEAD
-=======
 // BlackSquareWindow Component
->>>>>>> bd9a5f0 (final version)
 export component BlackSquareWindow inherits Window {
     title: "EZPass";
     icon: @image-url("icon/icon.png");
     min-width: 800px;
     min-height: 700px;
-<<<<<<< HEAD
-    // Allow resizing by not setting fixed width/height (min-* ensures a minimum size)
     preferred-width: 800px;
     preferred-height: 700px;
-
-=======
-    preferred-width: 800px;
-    preferred-height: 700px;
->>>>>>> bd9a5f0 (final version)
     in-out property <[PasswordEntry]> password_entries;
     in-out property <bool> panelVisible: false;
     in-out property <string> selected_website;
     in-out property <string> selected_username_email;
     in-out property <string> selected_password;
-<<<<<<< HEAD
-    property <bool> passwordVisible: false;
-    property <bool> editvisible: false;
-    in-out property <bool> isAddMode: false;
-    in-out property <bool> editmode: false;
-    in-out property <int> id;
-    callback refresh_passwords();
-    callback add_password();
-    callback savePassword();
-    in-out property <string> message;
-    callback edit(int, string, string, string);
-    callback deletePassword(int);
-    // New property for autostart toggle
-    in-out property <bool> autostart_enabled;
-    callback toggle_autostart(bool); // Callback to notify Rust of the change
-    callback logout();
-    callback export_database();
-    callback import_database();
-=======
     private property <bool> passwordVisible: false;
     in-out property <bool> isAddMode: false;
     in-out property <int> id;
@@ -383,7 +172,6 @@ export component BlackSquareWindow inherits Window {
     callback export();
     in-out property <bool> websocket_enabled;
     callback websocket(bool);
->>>>>>> bd9a5f0 (final version)
 
     Rectangle {
         background: black;
@@ -391,95 +179,6 @@ export component BlackSquareWindow inherits Window {
         height: 100%;
 
         HorizontalLayout {
-<<<<<<< HEAD
-            width: 100%;
-            height: 100%; // Fill the window height
-            spacing: 10px;
-            padding: 10px;
-
-            Rectangle {
-                width: 40%;
-                height: parent.height;
-                clip: true;
-
-                header := HorizontalLayout {
-                    y: 0;
-                    height: 40px;
-                    width: 100%;
-                    padding-left: 10px;
-                    padding-right: 10px;
-
-                    Text {
-                        text: "Passwords";
-                        color: white;
-                        font-size: 18px;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle { width: 1px; }
-
-                    TouchArea {
-                        width: 30px;
-                        height: 30px;
-                        padding-bottom: 10px;
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.isAddMode = true;
-                            root.panelVisible = true;
-                            root.selected_website = "";
-                            root.selected_username_email = "";
-                            root.selected_password = "";
-                            debug("Add password");
-                        }
-
-                        Rectangle {
-                            width: 100%;
-                            height: 100%;
-                            background: #555555;
-                            border-radius: 4px;
-                            Text {
-                                text: "+";
-                                color: white;
-                                font-size: 20px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                ScrollView {
-                    y: header.height;
-                    height: parent.height - header.height;
-                    width: 100%;
-                    vertical-scrollbar-policy: ScrollBarPolicy.always-on;
-                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-
-                    VerticalLayout {
-                        padding: 5px;
-                        spacing: 10px;
-                        width: parent.width - 20px; // Account for scrollbar width
-
-                        for entry in root.password_entries: PasswordCard {
-                            id: entry.id;
-                            website: entry.website;
-                            username_email: entry.username_email;
-                            password: entry.password;
-
-                            edit-clicked(id) => {
-                                root.isAddMode = false;
-                                root.selected_website = entry.website;
-                                root.id = id;
-                                root.selected_username_email = entry.username_email;
-                                root.selected_password = entry.password;
-                                root.panelVisible = true;
-                                debug("Editing entry for: " + id);
-                            }
-
-                            delete-clicked(id) => {
-                                debug("Deleting entry for: " + id);
-                                root.deletePassword(id);
-=======
             padding: 10px;
             spacing: 10px;
 
@@ -531,7 +230,6 @@ export component BlackSquareWindow inherits Window {
                                     root.panelVisible = true;
                                 }
                                 delete-clicked(id) => { root.deletePassword(id); }
->>>>>>> bd9a5f0 (final version)
                             }
                         }
                     }
@@ -539,54 +237,6 @@ export component BlackSquareWindow inherits Window {
             }
 
             Rectangle {
-<<<<<<< HEAD
-                height: parent.height;
-                background: #000000;
-                border-radius: 8px;
-                padding: 20px;
-                visible: root.panelVisible;
-
-                VerticalLayout {
-                    alignment: LayoutAlignment.stretch;
-                    width: 50%;
-                    min-width: 0px;
-                    preferred-height: 0px;
-                    spacing: 20px;
-
-                    HorizontalLayout {
-                        height: 40px;
-                        Text {
-                            text: root.isAddMode ? "Add Password" : "Edit Password";
-                            font-size: 18px;
-                            color: white;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { width: 1px; }
-                    }
-
-                    LineEdit {
-                        placeholder-text: "Website";
-                        text <=> root.selected_website;
-                        font-size: 16px;
-                        height: 40px;
-                    }
-
-                    LineEdit {
-                        placeholder-text: "User/E-mail";
-                        text <=> root.selected_username_email;
-                        font-size: 16px;
-                        height: 40px;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        LineEdit {
-                            placeholder-text: "Password";
-                            text <=> root.selected_password;
-                            font-size: 16px;
-                            height: 40px;
-                            input-type: root.passwordVisible ? InputType.text : InputType.password;
-=======
                 visible: root.panelVisible;
                 background: #000000;
                 border-radius: 8px;
@@ -607,24 +257,10 @@ export component BlackSquareWindow inherits Window {
                             font-size: 16px; 
                             height: 40px; 
                             input-type: root.passwordVisible ? InputType.text : InputType.password; 
->>>>>>> bd9a5f0 (final version)
                         }
                         Rectangle {
                             width: 40px;
                             height: 40px;
-<<<<<<< HEAD
-                            background: transparent;
-                            Text {
-                                text: "👁";
-                                font-size: 24px;
-                                color: root.passwordVisible ? #007AFF : #8E8E93;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            TouchArea {
-                                clicked => {
-                                    root.passwordVisible = !root.passwordVisible;
-=======
                             TouchArea {
                                 clicked => { root.passwordVisible = !root.passwordVisible; }
                                 mouse-cursor: pointer;
@@ -634,21 +270,10 @@ export component BlackSquareWindow inherits Window {
                                     color: root.passwordVisible ? #007AFF : #8E8E93; 
                                     horizontal-alignment: center; 
                                     vertical-alignment: center; 
->>>>>>> bd9a5f0 (final version)
                                 }
                             }
                         }
                     }
-<<<<<<< HEAD
-
-                    HorizontalLayout {
-                        spacing: 10px;
-                        StyledButton {
-                            text: "Save";
-                            clicked => {
-                                if (root.selected_website != "" && root.selected_username_email != "" && root.selected_password != "") {
-                                    root.savePassword();
-=======
                     HorizontalLayout {
                         spacing: 10px;
                         StyledButton { 
@@ -656,33 +281,11 @@ export component BlackSquareWindow inherits Window {
                             clicked => { 
                                 if (root.selected_website != "" && root.selected_username_email != "" && root.selected_password != "") {
                                     root.save_password();
->>>>>>> bd9a5f0 (final version)
                                 } else {
                                     root.message = "❌ Please fill in all fields.";
                                 }
                             }
                         }
-<<<<<<< HEAD
-                        StyledButton {
-                            text: "Cancel";
-                            clicked => {
-                                root.panelVisible = false;
-                                root.selected_website = "";
-                                root.selected_username_email = "";
-                                root.selected_password = "";
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.message;
-                        font-size: 24px;
-                        color: white;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
-=======
                         StyledButton { 
                             button-text: "Cancel"; 
                             clicked => { 
@@ -694,32 +297,10 @@ export component BlackSquareWindow inherits Window {
                         }
                     }
                     Text { text: root.message; font-size: 24px; color: white; horizontal-alignment: center; wrap: word-wrap; }
->>>>>>> bd9a5f0 (final version)
                 }
             }
         }
 
-<<<<<<< HEAD
-        Button {
-            text: "Logout";
-            
-            x: parent.width - self.width - 20px;
-            y: parent.height - self.height - 50px;
-            clicked => {
-                root.logout();
-            }
-        }
-
-        // Add CheckBox in the bottom-right corner
-        Switch {
-            x: parent.width - self.width - 20px; // 20px padding from right
-            y: parent.height - self.height - 20px; // 20px padding from bottom
-            text: "Run at Startup";
-            checked <=> root.autostart_enabled;
-            toggled => {
-                root.toggle_autostart(root.autostart_enabled);
-            }
-=======
         Button { text: "Export"; x: parent.width - self.width - 20px; y: parent.height - self.height - 130px; clicked => { root.export(); } }
         Button { text: "Logout"; x: parent.width - self.width - 20px; y: parent.height - self.height - 90px; clicked => { root.logout(); } }
         Switch { 
@@ -735,7 +316,6 @@ export component BlackSquareWindow inherits Window {
             text: "Suporte Extensão"; 
             checked <=> root.websocket_enabled; 
             toggled => { root.websocket(root.websocket_enabled); } 
->>>>>>> bd9a5f0 (final version)
         }
     }
 }
