@@ -36,7 +36,13 @@ dependencies = [
  "slint",
  "slint-build",
  "tokio",
+<<<<<<< HEAD
  "tokio-tungstenite",
+=======
+ "tokio-macros",
+ "tokio-tungstenite",
+ "tray-icon",
+>>>>>>> bd9a5f0 (final version)
  "url",
  "winreg 0.55.0",
  "winres",
@@ -887,7 +893,11 @@ checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
  "glob",
  "libc",
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
 ]
 
 [[package]]
@@ -1356,7 +1366,11 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330c60081dcc4c72131f8eb70510f1ac07223e5d4163db481a04a0befcffa412"
 dependencies = [
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
 ]
 
 [[package]]
@@ -2092,7 +2106,11 @@ dependencies = [
  "glutin_egl_sys",
  "glutin_glx_sys",
  "glutin_wgl_sys",
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
@@ -2366,7 +2384,11 @@ dependencies = [
  "cfg-if",
  "derive_more",
  "fontdb",
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
  "ttf-parser 0.25.1",
 ]
 
@@ -2897,6 +2919,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03087c2bad5e1034e8cace5926dec053fb3790248370865f5117a7d0213354c8"
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "libappindicator"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03589b9607c868cc7ae54c0b2a22c8dc03dd41692d48f2d7df73615c6a95dc0a"
+dependencies = [
+ "glib",
+ "gtk",
+ "gtk-sys",
+ "libappindicator-sys",
+ "log",
+]
+
+[[package]]
+name = "libappindicator-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
+dependencies = [
+ "gtk-sys",
+ "libloading 0.7.4",
+ "once_cell",
+]
+
+[[package]]
+>>>>>>> bd9a5f0 (final version)
 name = "libc"
 version = "0.2.171"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2914,6 +2963,19 @@ dependencies = [
 
 [[package]]
 name = "libloading"
+<<<<<<< HEAD
+=======
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
+dependencies = [
+ "cfg-if",
+ "winapi",
+]
+
+[[package]]
+name = "libloading"
+>>>>>>> bd9a5f0 (final version)
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
@@ -3541,6 +3603,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a21c6c9014b82c39515db5b396f91645182611c97d24637cf56ac01e5f8d998"
 dependencies = [
  "bitflags 2.9.0",
+<<<<<<< HEAD
+=======
+ "block2 0.6.0",
+>>>>>>> bd9a5f0 (final version)
  "objc2 0.6.0",
  "objc2-core-foundation",
 ]
@@ -5151,7 +5217,11 @@ checksum = "0324504befd01cab6e0c994f34b2ffa257849ee019d3fb3b64fb2c858887d89e"
 dependencies = [
  "as-raw-xcb-connection",
  "ctor-lite",
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
  "pkg-config",
  "tracing",
 ]
@@ -5320,6 +5390,30 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "tray-icon"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d433764348e7084bad2c5ea22c96c71b61b17afe3a11645710f533bd72b6a2b5"
+dependencies = [
+ "crossbeam-channel",
+ "dirs",
+ "libappindicator",
+ "muda",
+ "objc2 0.6.0",
+ "objc2-app-kit 0.3.0",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.0",
+ "once_cell",
+ "png",
+ "thiserror 2.0.12",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+>>>>>>> bd9a5f0 (final version)
 name = "ttf-parser"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6319,7 +6413,11 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
+<<<<<<< HEAD
  "libloading",
+=======
+ "libloading 0.8.6",
+>>>>>>> bd9a5f0 (final version)
  "once_cell",
  "rustix 0.38.44",
  "x11rb-protocol",
