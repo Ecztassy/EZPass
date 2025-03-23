@@ -1078,27 +1078,61 @@ fn add_password_with_selectors(
         let tx = pooled_conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| anyhow!("Failed to start transaction for website={}: {}", website, e))?;
-        println!("Started transaction for adding password for website={}", website);
+        println!("Started transaction for adding/updating password for website={}", website);
 
-        match tx.execute(
-            "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
-            params![user_id, website, username_email, &encrypted_password],
-        ) {
-            Ok(rows) => println!(
-                "Inserted password for website={}, username={}, rows affected={}",
-                website, username_email, rows
-            ),
-            Err(e) => {
-                println!("Failed to insert password into Passwords table: {}", e);
-                tx.rollback()
-                    .map_err(|re| anyhow!("Rollback failed after insert error: {}", re))?;
-                return Err(anyhow!(
-                    "Failed to insert password into Passwords table for website={}: {}",
-                    website, e
-                ));
+        // Check if an entry exists for user_id, website, and username_email
+        let existing_id: Option<i32> = tx
+            .query_row(
+                "SELECT id FROM Passwords WHERE user_id = ?1 AND website = ?2 AND username_email = ?3",
+                params![user_id, website, username_email],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| anyhow!("Failed to check existing entry for website={}: {}", website, e))?;
+
+        if let Some(id) = existing_id {
+            // Update the existing password
+            match tx.execute(
+                "UPDATE Passwords SET password = ?1 WHERE id = ?2",
+                params![&encrypted_password, id],
+            ) {
+                Ok(rows) => println!(
+                    "Updated password for website={}, username={}, rows affected={}",
+                    website, username_email, rows
+                ),
+                Err(e) => {
+                    println!("Failed to update password: {}", e);
+                    tx.rollback()
+                        .map_err(|re| anyhow!("Rollback failed after update error: {}", re))?;
+                    return Err(anyhow!(
+                        "Failed to update password for website={}, username={}: {}",
+                        website, username_email, e
+                    ));
+                }
+            }
+        } else {
+            // Insert a new password entry
+            match tx.execute(
+                "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
+                params![user_id, website, username_email, &encrypted_password],
+            ) {
+                Ok(rows) => println!(
+                    "Inserted password for website={}, username={}, rows affected={}",
+                    website, username_email, rows
+                ),
+                Err(e) => {
+                    println!("Failed to insert password: {}", e);
+                    tx.rollback()
+                        .map_err(|re| anyhow!("Rollback failed after insert error: {}", re))?;
+                    return Err(anyhow!(
+                        "Failed to insert password for website={}, username={}: {}",
+                        website, username_email, e
+                    ));
+                }
             }
         }
 
+        // Update field preferences
         for (selector, role) in [(username_selector, "Username"), (password_selector, "Password")] {
             match tx.execute(
                 "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?1, ?2, ?3)",
@@ -1125,24 +1159,25 @@ fn add_password_with_selectors(
         println!("Committed password and preferences for website={}", website);
     }
 
+    // Verify the specific entry exists
     let count: i32 = pooled_conn
         .query_row(
-            "SELECT COUNT(*) FROM Passwords WHERE user_id = ?1 AND website = ?2",
-            params![user_id, website],
+            "SELECT COUNT(*) FROM Passwords WHERE user_id = ?1 AND website = ?2 AND username_email = ?3",
+            params![user_id, website, username_email],
             |row| row.get(0),
         )
-        .map_err(|e| anyhow!("Failed to verify insertion for website={}: {}", website, e))?;
-    println!("Password count after insert for website={}: {}", website, count);
+        .map_err(|e| anyhow!("Failed to verify entry for website={}: {}", website, e))?;
+    println!("Password count for website={}, username={}: {}", website, username_email, count);
     if count == 0 {
         return Err(anyhow!(
-            "Password was not persisted in the database for website={} despite commit",
-            website
+            "Password entry not found after operation for website={}, username={}",
+            website, username_email
         ));
     }
 
     let prefs = get_field_preferences(conn, website)?;
     println!("Saved preferences for website={}: {:?}", website, prefs);
-    println!("Password and preferences successfully added for website={}", website);
+    println!("Password and preferences successfully managed for website={}", website);
     Ok(())
 }
 
