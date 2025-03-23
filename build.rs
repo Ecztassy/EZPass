@@ -3,12 +3,6 @@ use std::io::BufWriter;
 use image::{self, ImageFormat, imageops};
 use slint_build;
 use embed_resource;
-<<<<<<< HEAD
-
-fn main() {
-    // Compile the Slint UI file
-    slint_build::compile("ui/app-window.slint").expect("Slint build failed");
-=======
 use slint_build::CompilerConfiguration;
 
 
@@ -20,7 +14,6 @@ fn main() {
     slint_build::compile_with_config("ui/app-window.slint", config).expect("Slint build failed");
 
 
->>>>>>> bd9a5f0 (final version)
 
     // Convert PNG to ICO
     let png_path = "ui/icon/icon.png";
