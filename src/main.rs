@@ -76,7 +76,7 @@ fn get_database_path(name: &str) -> PathBuf {
         .join("EZPass")
         .join(DATABASE_DIR);
     if !dir.exists() {
-        fs::create_dir_all(&dir).expect("Failed to create databases directory");
+        fs::create_dir_all(&dir).expect("Falha ao obter o diretório das DB.");
     }
     dir.join(format!("{}.db", name))
 }
@@ -159,10 +159,10 @@ async fn import_database(db_file: &Path, masterkey_file: &Path) -> Result<()> {
     let mut config = load_config()?;
     let name = db_file.file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("Invalid database file name"))?;
+        .ok_or_else(|| anyhow!("Nome da Database Inválido"))?;
     
     if config.databases.iter().any(|db| db.name == name) {
-        return Err(anyhow!("Database name already exists"));
+        return Err(anyhow!("O nome da Database já existe"));
     }
 
     let db_path = get_database_path(name);
@@ -250,7 +250,7 @@ async fn check_login(
                             window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                             window.show().unwrap();
                             if is_passwords_empty {
-                                window.set_message("No passwords found.".into());
+                                window.set_message("Nenhuma Password encontrada.".into());
                             }
                         }
                     }
@@ -269,7 +269,7 @@ async fn check_masterkey_login(
     black_square_window_handle: Weak<BlackSquareWindow>,
 ) -> Result<(bool, i32, Arc<Pool<SqliteConnectionManager>>)> {
     let masterkey_hex = fs::read_to_string(masterkey_path)?;
-    let masterkey = hex::decode(&masterkey_hex).map_err(|e| anyhow!("Invalid masterkey file: {}", e))?;
+    let masterkey = hex::decode(&masterkey_hex).map_err(|e| anyhow!("Arquivo masterkey inválido: {}", e))?;
     let conn = setup_database(db_path).await?;
     let conn_inner = conn.get()?;
     let mut stmt = conn_inner.prepare("SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?")?;
@@ -292,7 +292,7 @@ async fn check_masterkey_login(
                         window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                         window.show().unwrap();
                         if is_passwords_empty {
-                            window.set_message("No passwords found or decryption failed for existing entries.".into());
+                            window.set_message("Sem passwords adicionadas.".into());
                         }
                     }
                 }
@@ -315,7 +315,7 @@ async fn read_stored_passwords(
         let website: String = row.get(1)?;
         let username_email: String = row.get(2)?;
         let encrypted_password: Vec<u8> = row.get(3)?;
-        let password = decrypt_password(&encrypted_password, &key).unwrap_or_else(|e| format!("Decryption failed: {}", e));
+        let password = decrypt_password(&encrypted_password, &key).unwrap_or_else(|e| format!("Formatação falhou {}", e));
         Ok(PasswordEntry {
             id,
             website: website.into(),
@@ -338,7 +338,7 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
             let ui = ui_weak.upgrade().unwrap();
             let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
             if username.is_empty() || password.is_empty() {
-                ui.set_message("Please enter username and password.".into());
+                ui.set_message("Por favor ensira o nome de utilizador e password.".into());
                 return;
             }
 
@@ -372,7 +372,7 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                             if let Some(ui) = ui_weak.upgrade() {
                                 match result {
                                     Ok((true, user_id, conn)) => {
-                                        ui.set_message("Login successful!".into());
+                                        ui.set_message("Login bem-sucessido!".into());
                                         ui.set_username("".into());
                                         ui.set_password("".into());
                                         ui.hide().unwrap();
@@ -380,8 +380,8 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                                             setup_password_handlers(&window, &conn, user_id, db_path, masterkey_path);
                                         }
                                     }
-                                    Ok((false, _, _)) => ui.set_message("Invalid username or password.".into()),
-                                    Err(e) => ui.set_message(format!("Login error: {}", e).into()),
+                                    Ok((false, _, _)) => ui.set_message("Utilizador e password inválida.".into()),
+                                    Err(e) => ui.set_message(format!("Erro de login: {}", e).into()),
                                 }
                             }
                         }
@@ -398,7 +398,7 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
             let ui = ui_weak.upgrade().unwrap();
             let username = ui.get_username().to_string();
             if username.is_empty() {
-                ui.set_message("Please enter username.".into());
+                ui.set_message("Por favor insira o utilizador.".into());
                 return;
             }
 
@@ -439,14 +439,14 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                             if let Some(ui) = ui_weak.upgrade() {
                                 match result {
                                     Ok((true, user_id, conn)) => {
-                                        ui.set_message("Login with masterkey successful!".into());
+                                        ui.set_message("Login com a masterkey bem sucedida!".into());
                                         ui.hide().unwrap();
                                         if let Some(window) = black_weak.upgrade() {
                                             setup_password_handlers(&window, &conn, user_id, db_path, masterkey_path);
                                         }
                                     }
-                                    Ok((false, _, _)) => ui.set_message("Invalid masterkey.".into()),
-                                    Err(e) => ui.set_message(format!("Error: {}", e).into()),
+                                    Ok((false, _, _)) => ui.set_message("Masterkey inválida.".into()),
+                                    Err(e) => ui.set_message(format!("Erro: {}", e).into()),
                                 }
                             }
                         }
@@ -465,7 +465,7 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
             let ui = ui_weak.upgrade().unwrap();
             let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
             if username.is_empty() || password.is_empty() {
-                ui.set_message("Please enter username and password.".into());
+                ui.set_message("Por favor insira utilizador e password.".into());
                 return;
             }
 
@@ -473,13 +473,13 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
                 let ui_weak = ui_weak.clone();
                 async move {
                     let db_path = match AsyncFileDialog::new()
-                        .set_file_name("new_database.db")
+                        .set_file_name("Nova_database.db")
                         .save_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Database creation cancelled.".into()));
+                                    ui_weak.upgrade().map(|ui| ui.set_message("Falha na criação de database".into()));
                                 }).unwrap();
                                 return;
                             }
@@ -501,11 +501,11 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
                                             });
                                             save_config(&config).unwrap();
                                         }
-                                        ui.set_message("Registration successful!".into());
+                                        ui.set_message("Registro bem sucedido!".into());
                                         ui.set_username("".into());
                                         ui.set_password("".into());
                                     }
-                                    Err(e) => ui.set_message(format!("Registration failed: {}", e).into()),
+                                    Err(e) => ui.set_message(format!("Falha no registro: {}", e).into()),
                                 }
                             }
                         }
@@ -525,14 +525,14 @@ async fn setup_import_handler(ui: Arc<LoginWindow>) {
                 let ui_weak = ui_weak.clone();
                 async move {
                     let db_file = match AsyncFileDialog::new()
-                        .set_title("Select Database File to Import")
-                        .add_filter("Database Files", &["db"])
+                        .set_title("Selecionar o arquivo de database para importar:")
+                        .add_filter("Database", &["db"])
                         .pick_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Database file selection cancelled.".into()));
+                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção da database cancelada".into()));
                                 }).unwrap();
                                 return;
                             }
@@ -545,17 +545,17 @@ async fn setup_import_handler(ui: Arc<LoginWindow>) {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Masterkey file selection cancelled.".into()));
+                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção da masterkey cancelada.".into()));
                                 }).unwrap();
                                 return;
                             }
                         };
                     match import_database(&db_file, &masterkey_file).await {
                         Ok(()) => slint::invoke_from_event_loop(move || {
-                            ui_weak.upgrade().map(|ui| ui.set_message("Database imported successfully!".into()));
+                            ui_weak.upgrade().map(|ui| ui.set_message("Database importada com sucesso!".into()));
                         }),
                         Err(e) => slint::invoke_from_event_loop(move || {
-                            ui_weak.upgrade().map(|ui| ui.set_message(format!("Import failed: {}", e).into()));
+                            ui_weak.upgrade().map(|ui| ui.set_message(format!("Importação falhou: {}", e).into()));
                         }),
                     }.unwrap();
                 }
@@ -576,20 +576,20 @@ fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBu
                 let masterkey_path = masterkey_path.clone();
                 async move {
                     let db_file = match AsyncFileDialog::new()
-                        .set_file_name("exported.db")
+                        .set_file_name("exportada.db")
                         .save_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    black_weak.upgrade().map(|w| w.set_message("Database export cancelled.".into()));
+                                    black_weak.upgrade().map(|w| w.set_message("Exportação da database cancelada.".into()));
                                 }).unwrap();
                                 return;
                             }
                         };
                     if let Err(e) = fs::copy(&db_path, &db_file) {
                         slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message(format!("Export database failed: {}", e).into()));
+                            black_weak.upgrade().map(|w| w.set_message(format!("Exportação da database falhou. {}", e).into()));
                         }).unwrap();
                         return;
                     }
@@ -600,17 +600,17 @@ fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBu
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    black_weak.upgrade().map(|w| w.set_message("Masterkey export cancelled.".into()));
+                                    black_weak.upgrade().map(|w| w.set_message("Exportação da masterkey cancelada".into()));
                                 }).unwrap();
                                 return;
                             }
                         };
                     match fs::copy(&masterkey_path, &masterkey_file) {
                         Ok(_) => slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message("Database and masterkey exported successfully!".into()));
+                            black_weak.upgrade().map(|w| w.set_message("Database e masterkey exportadas com sucesso!".into()));
                         }),
                         Err(e) => slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message(format!("Export masterkey failed: {}", e).into()));
+                            black_weak.upgrade().map(|w| w.set_message(format!("Exportação da masterkey falhou: {}", e).into()));
                         }),
                     }.unwrap();
                 }
@@ -624,7 +624,7 @@ async fn start_websocket_server(
     ui_sender: Sender<UiUpdate>,
     user_id: i32,
 ) {
-    println!("Starting WebSocket server on 127.0.0.1:9001...");
+    println!("Iniciando websocket no 127.0.0.1:9001...");
     let listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     *WEBSOCKET_SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
@@ -633,10 +633,10 @@ async fn start_websocket_server(
         result = listener.accept() => result,
         _ = shutdown_rx.changed() => {
             if *shutdown_rx.borrow() {
-                println!("WebSocket server shutting down...");
+                println!("Servidor websocket a desligar...");
                 break 'websocket_loop;
             }
-            println!("WebSocket server received shutdown signal but continuing...");
+            println!("websocket recebeu pedido de desligar mas não terminou");
             continue 'websocket_loop;
         }
     } {
@@ -648,9 +648,9 @@ async fn start_websocket_server(
                 while let Some(msg) = read.next().await {
                     if let Ok(Message::Text(text)) = msg {
                         let response = process_websocket_message(&conn_clone, &text, &ui_sender_clone, user_id).await;
-                        let json_response = serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\":\"Serialization error: {}\"}}", e));
+                        let json_response = serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\":\"Erro de formatação: {}\"}}", e));
                         if write.send(Message::Text(json_response.into())).await.is_err() {
-                            println!("Failed to send WebSocket message, closing connection.");
+                            println!("Falha na mensagem do websocket, a terminar ligação...");
                             break;
                         }
                     }
@@ -658,7 +658,7 @@ async fn start_websocket_server(
             }
         });
     }
-    println!("WebSocket server has stopped.");
+    println!("Websocket desligou.");
 }
 
 fn save_website_preference(
@@ -697,7 +697,7 @@ async fn process_websocket_message(
     ui_sender: &Sender<UiUpdate>,
     user_id: i32,
 ) -> WebSocketResponse {
-    println!("WebSocket received: {}", text);
+    println!("WebSocket recebeu: {}", text);
     match text {
         t if t.starts_with("PREF:") => {
             let parts: Vec<&str> = t[5..].split("|").collect();
@@ -725,7 +725,7 @@ async fn process_websocket_message(
                     username_email: None,
                     preferences: Vec::new(),
                     save_allowed: None,
-                    error: Some(format!("Invalid PREF format, expected 3 parts, got {}", parts.len())),
+                    error: Some(format!("Formato Inválido: {}", parts.len())),
                     multiple_accounts: None,
                 }
             }
@@ -769,7 +769,7 @@ async fn process_websocket_message(
                     username_email: None,
                     preferences: Vec::new(),
                     save_allowed: None,
-                    error: Some(format!("Invalid GET_FIELD format, expected 2 parts, got {}", parts.len())),
+                    error: Some(format!("Formato Inválido: {}", parts.len())),
                     multiple_accounts: None,
                 }
             }
@@ -802,7 +802,7 @@ async fn process_websocket_message(
                     username_email: None,
                     preferences: Vec::new(),
                     save_allowed: None,
-                    error: Some(format!("Invalid SET_WEBSITE_PREF format, expected 2 parts, got {}", parts.len())),
+                    error: Some(format!("Formato Inválido: {}", parts.len())),
                     multiple_accounts: None,
                 }
             }
@@ -814,19 +814,19 @@ async fn process_websocket_message(
                 let website = parts[0];
                 println!("Processing ADD_PASSWORD for website: {}", website);
                 if !get_website_preference(conn, user_id, website).unwrap_or(true) {
-                    let _ = ui_sender.send(UiUpdate::Error("Saving passwords disabled for this website".to_string())).await;
+                    let _ = ui_sender.send(UiUpdate::Error("Guardar passwords desligado para este website".to_string())).await;
                     return WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
                         save_allowed: Some(false),
-                        error: Some("Saving passwords disabled for this website".to_string()),
+                        error: Some("Guardar passwords desligado para este website".to_string()),
                         multiple_accounts: None,
                     };
                 }
                 match add_password_with_selectors(conn, user_id, website, parts[1], parts[2], parts[3], parts[4]) {
                     Ok(()) => {
-                        println!("Password added successfully, updating UI");
+                        println!("Password recebida com sucesso, a atualizar ui");
                         let conn_clone = Arc::clone(conn);
                         let ui_sender_clone = ui_sender.clone();
                         tokio::spawn(async move {
@@ -837,7 +837,7 @@ async fn process_websocket_message(
                             let _ = ui_sender_clone
                                 .send(UiUpdate::AddPasswordSuccess(passwords))
                                 .await
-                                .map_err(|e| println!("Failed to send UI update: {}", e));
+                                .map_err(|e| println!("Falha na atualização da ui {}", e));
                         });
                         WebSocketResponse {
                             password: Some(parts[2].to_string()),
@@ -859,7 +859,7 @@ async fn process_websocket_message(
                     }
                     Err(e) => {
                         let error_message = e.to_string();
-                        println!("Failed to add password: {}", error_message);
+                        println!("Falha em adicionar password: {}", error_message);
                         let _ = ui_sender.send(UiUpdate::Error(error_message.clone())).await;
                         WebSocketResponse {
                             password: None,
@@ -872,7 +872,7 @@ async fn process_websocket_message(
                     }
                 }
             } else {
-                let error_message = format!("Invalid ADD_PASSWORD format, expected 5 parts, got {}", parts.len());
+                let error_message = format!("Formato Inválido {}", parts.len());
                 println!("{}", error_message);
                 let _ = ui_sender.send(UiUpdate::Error(error_message.clone())).await;
                 WebSocketResponse {
@@ -886,10 +886,10 @@ async fn process_websocket_message(
             }
         }
         website => {
-            println!("Processing fill request for: {}", website);
+            println!("A processar autofill para: {}", website);
             match retrieve_password_and_prefs(conn, user_id, website) {
                 Ok(credentials) => {
-                    println!("Retrieved credentials: {:?}", credentials);
+                    println!("Informação passada: {:?}", credentials);
                     if credentials.is_empty() {
                         return WebSocketResponse {
                             password: None,
@@ -929,7 +929,7 @@ async fn process_websocket_message(
                 }
                 Err(e) => {
                     let error_message = e.to_string();
-                    println!("Fill request error: {}", error_message);
+                    println!("Erro de request: {}", error_message);
                     let _ = ui_sender.send(UiUpdate::Error(error_message.clone())).await;
                     WebSocketResponse {
                         password: None,
@@ -1062,22 +1062,22 @@ fn add_password_with_selectors(
         .lock()
         .unwrap()
         .clone()
-        .ok_or_else(|| anyhow!("Encryption key not set for user_id={}", user_id))?;
-    println!("Encryption key acquired for user_id={}", user_id);
+        .ok_or_else(|| anyhow!("Chave de encriptção não definida={}", user_id))?;
+    println!("Chave de encriptação para: {}", user_id);
 
     let encrypted_password = encrypt(password.as_bytes(), &key)
-        .map_err(|e| anyhow!("Failed to encrypt password for website={}: {}", website, e))?;
-    println!("Password encrypted successfully for website={}", website);
+        .map_err(|e| anyhow!("Falha ao encriptar password para website={}: {}", website, e))?;
+    println!("Password encriptada com sucesso para website={}", website);
 
     let mut pooled_conn = conn
         .get()
-        .map_err(|e| anyhow!("Failed to get database connection for website={}: {}", website, e))?;
+        .map_err(|e| anyhow!("Falha ao conectar com a database para website={}: {}", website, e))?;
     println!("Database connection acquired for website={}", website);
 
     {
         let tx = pooled_conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| anyhow!("Failed to start transaction for website={}: {}", website, e))?;
+            .map_err(|e| anyhow!("Falha na transação para website={}: {}", website, e))?;
         println!("Started transaction for adding/updating password for website={}", website);
 
         // Check if an entry exists for user_id, website, and username_email
@@ -1190,7 +1190,7 @@ fn spawn_ui_update_handler(weak_window: Weak<BlackSquareWindow>, mut ui_receiver
                     if let Some(window) = weak_window.upgrade() {
                         match update {
                             UiUpdate::AddPasswordSuccess(passwords) => {
-                                window.set_message("✅ Password added successfully!".into());
+                                window.set_message("✅ Password adicionada com sucesso!".into());
                                 window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                             }
                             UiUpdate::Error(msg) => window.set_message(format!("❌ {}", msg).into()),
@@ -1223,7 +1223,7 @@ fn setup_password_handlers(
                 window.get_selected_password().to_string(),
             );
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
-                window.set_message("All fields are required.".into());
+                window.set_message("Todos os campos são necessários".into());
                 return;
             }
 
@@ -1242,7 +1242,7 @@ fn setup_password_handlers(
                         if let Some(window) = black_weak.upgrade() {
                             match result {
                                 Ok(_) => {
-                                    window.set_message(if window.get_isAddMode() { "Password added successfully!" } else { "Password updated successfully!" }.into());
+                                    window.set_message(if window.get_isAddMode() { "Password adicionada com sucesso!" } else { "Password atualizada com sucesso!" }.into());
                                     window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                                 }
                                 Err(e) => window.set_message(format!("Error: {}", e).into()),
@@ -1264,17 +1264,17 @@ fn setup_password_handlers(
                 let handle = tokio::spawn(start_websocket_server(Arc::clone(&conn), ui_sender, user_id));
                 *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
                 spawn_ui_update_handler(window.as_weak(), ui_receiver);
-                window.set_message("✅ WebSocket server started!".into());
+                window.set_message("✅ Websocket Iniciado!".into());
                 window.set_websocket_enabled(true);
             } else {
                 if let Some(shutdown_tx) = WEBSOCKET_SHUTDOWN.lock().unwrap().as_ref() {
                     let _ = shutdown_tx.send(true);
                     if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
                         handle.abort();
-                        window.set_message("✅ WebSocket server stopped.".into());
+                        window.set_message("✅ WebSocket foi parado.".into());
                     }
                 } else {
-                    window.set_message("❌ No WebSocket server running to stop.".into());
+                    window.set_message("❌ Sem websocket para parar.".into());
                 }
                 window.set_websocket_enabled(false);
                 *WEBSOCKET_SHUTDOWN.lock().unwrap() = None;
@@ -1291,7 +1291,7 @@ fn setup_password_handlers(
             let window = black_weak.upgrade().unwrap();
             let (website, username_email, password) = (website.to_string(), username_email.to_string(), password.to_string());
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
-                window.set_message("All fields must be filled.".into());
+                window.set_message("Todos os campos precisam de ser preenchidos.".into());
                 return;
             }
 
@@ -1306,10 +1306,10 @@ fn setup_password_handlers(
                         if let Some(window) = black_weak.upgrade() {
                             match result {
                                 Ok(_) => {
-                                    window.set_message("✅ Password updated successfully!".into());
+                                    window.set_message("✅ Password atualizada com sucesso!".into());
                                     window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                                 }
-                                Err(e) => window.set_message(format!("❌ Error updating password: {}", e).into()),
+                                Err(e) => window.set_message(format!("❌ Erro ao atualizar a password: {}", e).into()),
                             }
                         }
                     }).unwrap();
@@ -1333,10 +1333,10 @@ fn setup_password_handlers(
                         if let Some(window) = black_weak.upgrade() {
                             match result {
                                 Ok(_) => {
-                                    window.set_message("✅ Password deleted successfully!".into());
+                                    window.set_message("✅ Password deleteda !".into());
                                     window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                                 }
-                                Err(e) => window.set_message(format!("❌ Error deleting password: {}", e).into()),
+                                Err(e) => window.set_message(format!("❌ Erro ao deletar password: {}", e).into()),
                             }
                         }
                     }).unwrap();
@@ -1353,15 +1353,15 @@ fn setup_password_handlers(
             let exe_path = std::env::current_exe().unwrap().to_str().unwrap().to_string();
             if enabled {
                 if let Err(e) = add_to_startup(app_name, &exe_path) {
-                    window.set_message(format!("❌ Failed to enable autostart: {}", e).into());
+                    window.set_message(format!("❌ Falha ao ativar autostart: {}", e).into());
                 } else {
-                    window.set_message("✅ Autostart enabled".into());
+                    window.set_message("✅ Autostart ativado".into());
                 }
             } else {
                 if let Err(e) = remove_from_startup(app_name) {
-                    window.set_message(format!("❌ Failed to disable autostart: {}", e).into());
+                    window.set_message(format!("❌ Falha ao desativar autostart: {}", e).into());
                 } else {
-                    window.set_message("✅ Autostart disabled".into());
+                    window.set_message("✅ Autostart desativado".into());
                 }
             }
         }
