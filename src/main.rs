@@ -2,30 +2,26 @@
 use std::sync::Arc;
 use rand::RngCore;
 use rfd::AsyncFileDialog;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use slint::{ModelRc, VecModel, Weak};
 use rand::rngs::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use anyhow::{Result, anyhow};
 use sha2::{Sha256, Digest};
 use std::path::{Path, PathBuf};
-use std::fs;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use futures_util::{StreamExt, SinkExt};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
-use serde_derive::{Serialize, Deserialize};
+use sqlx::{Pool, SqlitePool, Sqlite, sqlite::SqlitePoolOptions};
+use serde::{Serialize, Deserialize};
 use serde_json;
 use tokio::sync::mpsc::{channel, Sender, Receiver};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use simple_crypt::{encrypt, decrypt};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use hex;
 use dirs;
+use tokio::fs;
 
 slint::include_modules!();
 
@@ -64,7 +60,7 @@ enum UiUpdate {
     Error(String),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, sqlx::FromRow)]
 struct FieldPreference {
     selector: String,
     role: String,
@@ -75,97 +71,109 @@ fn get_database_path(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass")
         .join(DATABASE_DIR);
-    if !dir.exists() {
-        fs::create_dir_all(&dir).expect("Falha ao obter o diretório das DB.");
-    }
     dir.join(format!("{}.db", name))
 }
 
-fn load_config() -> Result<Config> {
+async fn load_config() -> Result<Config> {
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass");
-    fs::create_dir_all(&config_dir)?;
+    tokio::fs::create_dir_all(&config_dir).await?;
     let config_path = config_dir.join("config.json");
     if config_path.exists() {
-        let config_str = fs::read_to_string(&config_path)?;
+        let config_str = tokio::fs::read_to_string(&config_path).await?;
         Ok(serde_json::from_str(&config_str)?)
     } else {
         Ok(Config { databases: Vec::with_capacity(4) })
     }
 }
 
-fn save_config(config: &Config) -> Result<()> {
+async fn save_config(config: &Config) -> Result<()> {
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass");
-    fs::create_dir_all(&config_dir)?;
+    tokio::fs::create_dir_all(&config_dir).await?;
     let config_path = config_dir.join("config.json");
     let config_str = serde_json::to_string_pretty(config)?;
-    fs::write(&config_path, config_str.as_bytes())?;
+    tokio::fs::write(&config_path, config_str.as_bytes()).await?;
     Ok(())
 }
 
-async fn setup_database(db_path: &Path) -> Result<Arc<Pool<SqliteConnectionManager>>> {
-    let manager = SqliteConnectionManager::file(db_path);
-    let pool = Arc::new(Pool::builder().max_size(5).build(manager)?);
+async fn setup_database(db_path: &Path) -> Result<SqlitePool, anyhow::Error> {
+    let db_url = format!("sqlite:{}", db_path.display());
+    println!("Connecting to database at: {}", db_url);
 
-    tokio::task::spawn_blocking({
-        let pool = Arc::clone(&pool);
-        move || {
-            let conn = pool.get()?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY,
-                    username TEXT NOT NULL UNIQUE,
-                    password TEXT NOT NULL CHECK(length(password) <= 128),
-                    salt TEXT NOT NULL,
-                    enc_key_encrypted_with_pwd BLOB NOT NULL,
-                    enc_key_encrypted_with_masterkey BLOB NOT NULL,
-                    enc_key_hash TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS Passwords (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    website TEXT NOT NULL,
-                    username_email TEXT NOT NULL,
-                    password BLOB NOT NULL,
-                    FOREIGN KEY (user_id) REFERENCES users(id)
-                );
-                CREATE TABLE IF NOT EXISTS FieldPreferences (
-                    id INTEGER PRIMARY KEY,
-                    website TEXT NOT NULL,
-                    selector TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('Username', 'Password')),
-                    UNIQUE(website, selector)
-                );
-                CREATE TABLE IF NOT EXISTS WebsitePreferences (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    website TEXT NOT NULL,
-                    save_password INTEGER NOT NULL DEFAULT 1,
-                    UNIQUE(user_id, website),
-                    FOREIGN KEY (user_id) REFERENCES users(id)
-                );"
-            )?;
-            Ok::<_, anyhow::Error>(())
+    // Ensure the file exists (SQLite won't create it automatically if the directory is writable)
+    if !db_path.exists() {
+        println!("Database file does not exist, creating: {:?}", db_path);
+        if let Err(e) = fs::File::create(db_path).await {
+            return Err(anyhow!("Failed to create database file: {}", e));
         }
-    }).await??;
+    }
 
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .map_err(|e| anyhow!("Failed to connect to database: {}", e))?;
+
+    println!("Database connected, creating tables...");
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL CHECK(length(password) <= 128),
+            salt TEXT NOT NULL,
+            enc_key_encrypted_with_pwd BLOB NOT NULL,
+            enc_key_encrypted_with_masterkey BLOB NOT NULL,
+            enc_key_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS Passwords (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            website TEXT NOT NULL,
+            username_email TEXT NOT NULL,
+            password BLOB NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS FieldPreferences (
+            id INTEGER PRIMARY KEY,
+            website TEXT NOT NULL,
+            selector TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('Username', 'Password')),
+            UNIQUE(website, selector)
+        );
+        CREATE TABLE IF NOT EXISTS WebsitePreferences (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            website TEXT NOT NULL,
+            save_password INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(user_id, website),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| anyhow!("Failed to create tables: {}", e))?;
+
+    println!("Tables created successfully");
     Ok(pool)
 }
 
-async fn import_database(db_file: &Path, masterkey_file: &Path, username: Option<&str>) -> Result<(i32, Arc<Pool<SqliteConnectionManager>>)> {
-    let mut config = load_config()?;
-    let name = db_file.file_stem()
+async fn import_database(
+    db_file: &Path,
+    masterkey_file: &Path,
+    username: Option<&str>,
+) -> Result<(i32, Pool<Sqlite>)> {
+    let mut config = load_config().await?;
+    let name = db_file
+        .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("Invalid database name"))?;
 
-    // Get unique destination path
+    // Generate unique db_path
     let mut db_path = get_database_path(name);
     let mut masterkey_path = db_path.with_extension("masterkey");
-    
-    // If a database with this name exists, create a unique name
     let mut counter = 1;
     let base_name = name.to_string();
     while config.databases.iter().any(|db| db.db_path == db_path) {
@@ -175,52 +183,91 @@ async fn import_database(db_file: &Path, masterkey_file: &Path, username: Option
         counter += 1;
     }
 
-    // Copy the files to the new location
-    fs::copy(db_file, &db_path)?;
-    fs::copy(masterkey_file, &masterkey_path)?;
+    // Log paths for debugging
+    println!("Source db_file: {:?}", db_file);
+    println!("Source masterkey_file: {:?}", masterkey_file);
+    println!("Target db_path: {:?}", db_path);
+    println!("Target masterkey_path: {:?}", masterkey_path);
 
-    // Setup database connection
+    // Ensure the target directory exists
+    if let Some(parent) = db_path.parent() {
+        println!("Creating directory: {:?}", parent);
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return Err(anyhow!("Failed to create directory {:?}: {}", parent, e));
+        }
+    }
+
+    // Copy files with error handling
+    if !db_file.exists() {
+        return Err(anyhow!("Source database file does not exist: {:?}", db_file));
+    }
+    if !masterkey_file.exists() {
+        return Err(anyhow!(
+            "Source masterkey file does not exist: {:?}",
+            masterkey_file
+        ));
+    }
+    tokio::fs::copy(db_file, &db_path)
+        .await
+        .map_err(|e| anyhow!("Failed to copy database file from {:?} to {:?}: {}", db_file, db_path, e))?;
+    tokio::fs::copy(masterkey_file, &masterkey_path)
+        .await
+        .map_err(|e| anyhow!("Failed to copy masterkey file from {:?} to {:?}: {}", masterkey_file, masterkey_path, e))?;
+
+    // Set up database connection
     let pool = setup_database(&db_path).await?;
 
-    // Verify the database is valid by checking if we can read from it
-    let conn = pool.get()?;
-    let masterkey_hex = fs::read_to_string(&masterkey_path)?;
+    // Read and verify masterkey
+    let masterkey_hex = tokio::fs::read_to_string(&masterkey_path)
+        .await
+        .map_err(|e| anyhow!("Failed to read masterkey file {:?}: {}", masterkey_path, e))?;
     let masterkey = hex::decode(&masterkey_hex)
-        .map_err(|e| anyhow!("Invalid masterkey file: {}", e))?;
+        .map_err(|e| anyhow!("Invalid masterkey format in {:?}: {}", masterkey_path, e))?;
 
-    let username_to_check = username.unwrap_or_else(|| "default"); // Fallback if no username provided
-    let mut stmt = conn.prepare(
-        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
-    )?;
-    
-    let (user_id, enc_key_encrypted, enc_key_hash) = stmt.query_row(params![username_to_check], |row| {
-        Ok((row.get::<_, i32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?))
-    }).optional()?.ok_or_else(|| anyhow!("User not found in imported database"))?;
+    // Verify user and encryption key
+    let username_to_check = username.unwrap_or("default");
+    let row = sqlx::query_as::<_, (i32, Vec<u8>, String)>(
+        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?",
+    )
+    .bind(username_to_check)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| anyhow!("Database query failed: {}", e))?;
 
-    // Verify masterkey
-    let decrypted_key = decrypt(&enc_key_encrypted, &masterkey)?;
+    let (user_id, enc_key_encrypted, enc_key_hash) = row
+        .ok_or_else(|| anyhow!("User '{}' not found in imported database", username_to_check))?;
+
+    let decrypted_key = decrypt(&enc_key_encrypted, &masterkey)
+        .map_err(|e| anyhow!("Failed to decrypt encryption key: {}", e))?;
     let mut hasher = Sha256::default();
     hasher.update(&decrypted_key);
     if hex::encode(hasher.finalize()) != enc_key_hash {
-        fs::remove_file(&db_path)?;
-        fs::remove_file(&masterkey_path)?;
+        // Cleanup on failure
+        if let Err(e) = tokio::fs::remove_file(&db_path).await {
+            println!("Failed to clean up db_path {:?}: {}", db_path, e);
+        }
+        if let Err(e) = tokio::fs::remove_file(&masterkey_path).await {
+            println!("Failed to clean up masterkey_path {:?}: {}", masterkey_path, e);
+        }
         return Err(anyhow!("Masterkey does not match the database"));
     }
 
-    // Update config only if verification succeeds
+    // Update config
     config.databases.push(DatabaseConfig {
         name: db_path.file_stem().unwrap().to_str().unwrap().to_string(),
         db_path: db_path.clone(),
         masterkey_path: masterkey_path.clone(),
     });
-    save_config(&config)?;
+    save_config(&config)
+        .await
+        .map_err(|e| anyhow!("Failed to save config: {}", e))?;
 
-    // Set encryption key and return pool with user_id for immediate use
     *ENCRYPTION_KEY.lock().unwrap() = Some(decrypted_key);
+    println!("Database imported successfully: {:?}", db_path);
     Ok((user_id, pool))
 }
 
-async fn register_user(db_path: &Path, username: String, password: String) -> Result<Arc<Pool<SqliteConnectionManager>>> {
+async fn register_user(db_path: &Path, username: String, password: String) -> Result<SqlitePool, Box<dyn std::error::Error>> {
     let salt = SaltString::generate(&mut OsRng);
     let hashed_password = hash_password(&password, &salt)?;
 
@@ -239,14 +286,20 @@ async fn register_user(db_path: &Path, username: String, password: String) -> Re
     let enc_key_hash = hex::encode(hasher.finalize());
 
     let masterkey_path = db_path.with_extension("masterkey");
-    export_hash_to_file(&hex::encode(&masterkey), &masterkey_path).await?;
-    
+    fs::write(&masterkey_path, hex::encode(&masterkey)).await?;
+
     let pool = setup_database(db_path).await?;
-    let conn = pool.get()?;
-    conn.execute(
-        "INSERT INTO users (username, password, salt, enc_key_encrypted_with_pwd, enc_key_encrypted_with_masterkey, enc_key_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![&username, &hashed_password, salt.as_str(), &enc_key_encrypted_with_pwd, &enc_key_encrypted_with_masterkey, &enc_key_hash],
-    )?;
+    sqlx::query(
+        "INSERT INTO users (username, password, salt, enc_key_encrypted_with_pwd, enc_key_encrypted_with_masterkey, enc_key_hash) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&username)
+    .bind(&hashed_password)
+    .bind(salt.as_str())
+    .bind(&enc_key_encrypted_with_pwd)
+    .bind(&enc_key_encrypted_with_masterkey)
+    .bind(&enc_key_hash)
+    .execute(&pool)
+    .await?;
 
     *ENCRYPTION_KEY.lock().unwrap() = Some(enc_key);
     Ok(pool)
@@ -257,20 +310,15 @@ async fn check_login(
     username: &str,
     password: &str,
     black_square_window_handle: Weak<BlackSquareWindow>,
-) -> Result<(bool, i32, Arc<Pool<SqliteConnectionManager>>)> {
-    let conn = setup_database(db_path).await?;
-    let conn_inner = conn.get()?;
-    let mut stmt = conn_inner.prepare("SELECT id, password, salt, enc_key_encrypted_with_pwd, enc_key_hash FROM users WHERE username = ?")?;
-    let row = stmt.query_row(params![username], |row| {
-        Ok((
-            row.get::<_, i32>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Vec<u8>>(3)?,
-            row.get::<_, String>(4)?
-        ))
-    }).optional()?;
-    
+) -> Result<(bool, i32, Pool<Sqlite>)> {
+    let pool = setup_database(db_path).await?;
+    let row = sqlx::query_as::<_, (i32, String, String, Vec<u8>, String)>(
+        "SELECT id, password, salt, enc_key_encrypted_with_pwd, enc_key_hash FROM users WHERE username = ?"
+    )
+    .bind(username)
+    .fetch_optional(&pool)
+    .await?;
+
     if let Some((user_id, stored_password, salt, enc_key_encrypted_with_pwd, enc_key_hash)) = row {
         let parsed_hash = PasswordHash::new(&stored_password).map_err(|e| anyhow!(e))?;
         if Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok() {
@@ -280,7 +328,7 @@ async fn check_login(
             hasher.update(&enc_key_candidate);
             if hex::encode(hasher.finalize()) == enc_key_hash {
                 *ENCRYPTION_KEY.lock().unwrap() = Some(enc_key_candidate.clone());
-                let passwords = read_stored_passwords(&conn, user_id, enc_key_candidate).await?;
+                let passwords = read_stored_passwords(&pool, user_id, enc_key_candidate).await?;
                 let is_passwords_empty = passwords.is_empty();
                 slint::invoke_from_event_loop({
                     let black_square_window_handle = black_square_window_handle.clone();
@@ -294,11 +342,11 @@ async fn check_login(
                         }
                     }
                 })?;
-                return Ok((true, user_id, conn));
+                return Ok((true, user_id, pool));
             }
         }
     }
-    Ok((false, 0, conn))
+    Ok((false, 0, pool))
 }
 
 async fn check_masterkey_login(
@@ -306,23 +354,24 @@ async fn check_masterkey_login(
     masterkey_path: &Path,
     username: &str,
     black_square_window_handle: Weak<BlackSquareWindow>,
-) -> Result<(bool, i32, Arc<Pool<SqliteConnectionManager>>)> {
-    let masterkey_hex = fs::read_to_string(masterkey_path)?;
+) -> Result<(bool, i32, Pool<Sqlite>)> {
+    let masterkey_hex = tokio::fs::read_to_string(masterkey_path).await?;
     let masterkey = hex::decode(&masterkey_hex).map_err(|e| anyhow!("Arquivo masterkey inválido: {}", e))?;
-    let conn = setup_database(db_path).await?;
-    let conn_inner = conn.get()?;
-    let mut stmt = conn_inner.prepare("SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?")?;
-    let row = stmt.query_row(params![username], |row| {
-        Ok((row.get::<_, i32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?))
-    }).optional()?;
-    
+    let pool = setup_database(db_path).await?;
+    let row = sqlx::query_as::<_, (i32, Vec<u8>, String)>(
+        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
+    )
+    .bind(username)
+    .fetch_optional(&pool)
+    .await?;
+
     if let Some((user_id, enc_key_encrypted_with_masterkey, enc_key_hash)) = row {
         let enc_key_candidate = decrypt(&enc_key_encrypted_with_masterkey, &masterkey)?;
         let mut hasher = Sha256::default();
         hasher.update(&enc_key_candidate);
         if hex::encode(hasher.finalize()) == enc_key_hash {
             *ENCRYPTION_KEY.lock().unwrap() = Some(enc_key_candidate.clone());
-            let passwords = read_stored_passwords(&conn, user_id, enc_key_candidate).await?;
+            let passwords = read_stored_passwords(&pool, user_id, enc_key_candidate).await?;
             let is_passwords_empty = passwords.is_empty();
             slint::invoke_from_event_loop({
                 let black_square_window_handle = black_square_window_handle.clone();
@@ -336,33 +385,30 @@ async fn check_masterkey_login(
                     }
                 }
             })?;
-            return Ok((true, user_id, conn));
+            return Ok((true, user_id, pool));
         }
     }
-    Ok((false, 0, conn))
+    Ok((false, 0, pool))
 }
 
-async fn read_stored_passwords(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    user_id: i32,
-    key: Vec<u8>,
-) -> Result<Vec<PasswordEntry>> {
-    let conn = conn.get()?;
-    let mut stmt = conn.prepare("SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?1")?;
-    let password_iter = stmt.query_map(params![user_id], |row| {
-        let id: i32 = row.get(0)?;
-        let website: String = row.get(1)?;
-        let username_email: String = row.get(2)?;
-        let encrypted_password: Vec<u8> = row.get(3)?;
+async fn read_stored_passwords(pool: &Pool<Sqlite>, user_id: i32, key: Vec<u8>) -> Result<Vec<PasswordEntry>> {
+    let rows = sqlx::query_as::<_, (i32, String, String, Vec<u8>)>(
+        "SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?"
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let passwords = rows.into_iter().map(|(id, website, username_email, encrypted_password)| {
         let password = decrypt_password(&encrypted_password, &key).unwrap_or_else(|e| format!("Formatação falhou {}", e));
-        Ok(PasswordEntry {
+        PasswordEntry {
             id,
             website: website.into(),
             username_email: username_email.into(),
             password: password.into(),
-        })
-    })?;
-    let passwords = password_iter.collect::<Result<Vec<_>, _>>()?;
+        }
+    }).collect();
+
     Ok(passwords)
 }
 
@@ -397,7 +443,7 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                                 return;
                             }
                         };
-                    let config = load_config().unwrap();
+                    let config = load_config().await.unwrap();
                     let masterkey_path = config.databases.iter()
                         .find(|db| db.db_path == db_path)
                         .map(|c| c.masterkey_path.clone())
@@ -410,13 +456,13 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                         move || {
                             if let Some(ui) = ui_weak.upgrade() {
                                 match result {
-                                    Ok((true, user_id, conn)) => {
+                                    Ok((true, user_id, pool)) => {
                                         ui.set_message("Login bem-sucessido!".into());
                                         ui.set_username("".into());
                                         ui.set_password("".into());
                                         ui.hide().unwrap();
                                         if let Some(window) = black_weak.upgrade() {
-                                            setup_password_handlers(&window, &conn, user_id, db_path, masterkey_path);
+                                            setup_password_handlers(&window, &pool, user_id, db_path, masterkey_path);
                                         }
                                     }
                                     Ok((false, _, _)) => ui.set_message("Utilizador e password inválida.".into()),
@@ -477,11 +523,11 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                         move || {
                             if let Some(ui) = ui_weak.upgrade() {
                                 match result {
-                                    Ok((true, user_id, conn)) => {
+                                    Ok((true, user_id, pool)) => {
                                         ui.set_message("Login com a masterkey bem sucedida!".into());
                                         ui.hide().unwrap();
                                         if let Some(window) = black_weak.upgrade() {
-                                            setup_password_handlers(&window, &conn, user_id, db_path, masterkey_path);
+                                            setup_password_handlers(&window, &pool, user_id, db_path, masterkey_path);
                                         }
                                     }
                                     Ok((false, _, _)) => ui.set_message("Masterkey inválida.".into()),
@@ -501,59 +547,114 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
     ui.on_register_clicked({
         let ui_weak = ui_weak.clone();
         move || {
-            let ui = ui_weak.upgrade().unwrap();
+            let ui = match ui_weak.upgrade() {
+                Some(ui) => ui,
+                None => return, // UI gone, exit silently
+            };
             let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
             if username.is_empty() || password.is_empty() {
                 ui.set_message("Por favor insira utilizador e password.".into());
                 return;
             }
 
-            slint::spawn_local({
-                let ui_weak = ui_weak.clone();
-                async move {
-                    let db_path = match AsyncFileDialog::new()
-                        .set_file_name("Nova_database.db")
-                        .save_file()
-                        .await {
-                            Some(handle) => handle.path().to_path_buf(),
-                            None => {
+            let ui_weak_inner = ui_weak.clone();
+            match slint::spawn_local(async move {
+                let dialog = AsyncFileDialog::new()
+                    .set_file_name("Nova_database.db")
+                    .set_title("Salvar Nova Database");
+                let db_path = match dialog.save_file().await {
+                    Some(handle) => {
+                        let path = handle.path().to_path_buf();
+                        println!("Selected db_path: {:?}", path); // Log the path
+                        if let Some(parent) = path.parent() {
+                            println!("Creating directory: {:?}", parent);
+                            if let Err(e) = fs::create_dir_all(parent).await {
+                                println!("Failed to create directory: {}", e);
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Falha na criação de database".into()));
-                                }).unwrap();
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                        ui.set_message(format!("Falha ao criar diretório: {}", e).into());
+                                    }
+                                }).ok();
                                 return;
                             }
-                        };
-                    let db_name = db_path.file_stem().unwrap().to_str().unwrap().to_string();
-                    let result = register_user(&db_path, username, password).await;
-                    slint::invoke_from_event_loop({
-                        let ui_weak = ui_weak.clone();
-                        move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                match result {
-                                    Ok(_conn) => {
-                                        let mut config = load_config().unwrap();
-                                        if !config.databases.iter().any(|db| db.db_path == db_path) {
-                                            config.databases.push(DatabaseConfig {
-                                                name: db_name,
-                                                db_path: db_path.clone(),
-                                                masterkey_path: db_path.with_extension("masterkey"),
-                                            });
-                                            save_config(&config).unwrap();
-                                        }
+                            println!("Directory created successfully: {:?}", parent);
+                        }
+                        path
+                    }
+                    None => {
+                        println!("Save file dialog canceled");
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_message("Registro cancelado".into());
+                            }
+                        }).ok();
+                        return;
+                    }
+                };
+
+                println!("Attempting to register user with db_path: {:?}", db_path);
+                let db_name = db_path.file_stem().unwrap().to_str().unwrap().to_string();
+                match register_user(&db_path, username, password).await {
+                    Ok(_pool) => {
+                        match load_config().await {
+                            Ok(mut config) => {
+                                if !config.databases.iter().any(|db| db.db_path == db_path) {
+                                    config.databases.push(DatabaseConfig {
+                                        name: db_name,
+                                        db_path: db_path.clone(),
+                                        masterkey_path: db_path.with_extension("masterkey"),
+                                    });
+                                    if let Err(e) = save_config(&config).await {
+                                        println!("Failed to save config: {}", e);
+                                        slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                                ui.set_message(format!("Falha ao salvar config: {}", e).into());
+                                            }
+                                        }).ok();
+                                        return;
+                                    }
+                                }
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
                                         ui.set_message("Registro bem sucedido!".into());
                                         ui.set_username("".into());
                                         ui.set_password("".into());
                                     }
-                                    Err(e) => ui.set_message(format!("Falha no registro: {}", e).into()),
-                                }
+                                }).ok();
+                            }
+                            Err(e) => {
+                                println!("Failed to load config: {}", e);
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                        ui.set_message(format!("Falha ao carregar config: {}", e).into());
+                                    }
+                                }).ok();
                             }
                         }
-                    }).unwrap();
+                    }
+                    Err(e) => {
+                        println!("Registration failed: {}", e);
+                        let error_message = e.to_string();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_message(format!("Falha no registro: {}", error_message).into());
+                            }
+                        }).ok();
+                    }
                 }
-            }).unwrap();
+            }) {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("Failed to spawn local task: {}", e);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_message(format!("Erro interno ao processar registro: {}", e).into());
+                    }
+                }
+            }
         }
     });
 }
+
 
 async fn setup_import_handler(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindow>) {
     let ui_weak = ui.as_weak();
@@ -563,66 +664,62 @@ async fn setup_import_handler(ui: Arc<LoginWindow>, black_square_window: Arc<Bla
         let ui_weak = ui_weak.clone();
         let black_weak = black_weak.clone();
         move || {
-            slint::spawn_local({
-                let ui_weak = ui_weak.clone();
-                let black_weak = black_weak.clone();
-                async move {
-                    let db_file = match AsyncFileDialog::new()
-                        .set_title("Select database file to import:")
-                        .add_filter("Database", &["db"])
-                        .pick_file()
-                        .await {
-                            Some(handle) => handle.path().to_path_buf(),
-                            None => {
-                                slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Database selection canceled".into()));
-                                })?;
-                                return Ok::<(), anyhow::Error>(());
-                            }
-                        };
-                    let masterkey_file = match AsyncFileDialog::new()
-                        .set_title("Select Masterkey File")
-                        .add_filter("Masterkey File", &["masterkey"])
-                        .pick_file()
-                        .await {
-                            Some(handle) => handle.path().to_path_buf(),
-                            None => {
-                                slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Masterkey selection canceled.".into()));
-                                })?;
-                                return Ok(());
-                            }
-                        };
-
-                    match import_database(&db_file, &masterkey_file, Some(&ui_weak.upgrade().unwrap().get_username().to_string())).await {
-                        Ok((user_id, pool)) => {
-                            let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                            let passwords = read_stored_passwords(&pool, user_id, key).await?;
-                            
-                            slint::invoke_from_event_loop({
-                                let ui_weak = ui_weak.clone();
-                                let black_weak = black_weak.clone();
-                                move || {
-                                    // Show the black square window first
-                                    if let Some(window) = black_weak.upgrade() {
-                                        window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
-                                        window.show().unwrap();
-                                        setup_password_handlers(&window, &pool, user_id, db_file.clone(), masterkey_file.clone());
-                                    }
-                                    // Then hide the login window
-                                    if let Some(ui) = ui_weak.upgrade() {
-                                        ui.set_message("Database imported successfully!".into());
-                                        ui.hide().unwrap();
-                                    }
-                                }
+            let ui_weak = ui_weak.clone();
+            let black_weak = black_weak.clone();
+            slint::spawn_local(async move {
+                let db_file = match AsyncFileDialog::new()
+                    .set_title("Select database file to import:")
+                    .add_filter("Database", &["db"])
+                    .pick_file()
+                    .await {
+                        Some(handle) => handle.path().to_path_buf(),
+                        None => {
+                            slint::invoke_from_event_loop(move || {
+                                ui_weak.upgrade().map(|ui| ui.set_message("Database selection canceled".into()));
                             })?;
+                            return Ok::<(), anyhow::Error>(());
                         }
-                        Err(e) => slint::invoke_from_event_loop(move || {
-                            ui_weak.upgrade().map(|ui| ui.set_message(format!("Import failed: {}", e).into()));
-                        })?,
+                    };
+                let masterkey_file = match AsyncFileDialog::new()
+                    .set_title("Select Masterkey File")
+                    .add_filter("Masterkey File", &["masterkey"])
+                    .pick_file()
+                    .await {
+                        Some(handle) => handle.path().to_path_buf(),
+                        None => {
+                            slint::invoke_from_event_loop(move || {
+                                ui_weak.upgrade().map(|ui| ui.set_message("Masterkey selection canceled.".into()));
+                            })?;
+                            return Ok(());
+                        }
+                    };
+
+                match import_database(&db_file, &masterkey_file, Some(&ui_weak.upgrade().unwrap().get_username().to_string())).await {
+                    Ok((user_id, pool)) => {
+                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                        let passwords = read_stored_passwords(&pool, user_id, key).await?;
+                        
+                        slint::invoke_from_event_loop({
+                            let ui_weak = ui_weak.clone();
+                            let black_weak = black_weak.clone();
+                            move || {
+                                if let Some(window) = black_weak.upgrade() {
+                                    window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+                                    window.show().unwrap();
+                                    setup_password_handlers(&window, &pool, user_id, db_file.clone(), masterkey_file.clone());
+                                }
+                                if let Some(ui) = ui_weak.upgrade() {
+                                    ui.set_message("Database imported successfully!".into());
+                                    ui.hide().unwrap();
+                                }
+                            }
+                        })?;
                     }
-                    Ok(())
+                    Err(e) => slint::invoke_from_event_loop(move || {
+                        ui_weak.upgrade().map(|ui| ui.set_message(format!("Import failed: {}", e).into()));
+                    })?,
                 }
+                Ok(())
             }).unwrap();
         }
     });
@@ -634,60 +731,56 @@ fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBu
         let db_path = db_path.clone();
         let masterkey_path = masterkey_path.clone();
         move || {
-            slint::spawn_local({
-                let black_weak = black_weak.clone();
-                let db_path = db_path.clone();
-                let masterkey_path = masterkey_path.clone();
-                async move {
-                    let db_file = match AsyncFileDialog::new()
-                        .set_file_name("exportada.db")
-                        .save_file()
-                        .await {
-                            Some(handle) => handle.path().to_path_buf(),
-                            None => {
-                                slint::invoke_from_event_loop(move || {
-                                    black_weak.upgrade().map(|w| w.set_message("Exportação da database cancelada.".into()));
-                                }).unwrap();
-                                return;
-                            }
-                        };
-                    if let Err(e) = fs::copy(&db_path, &db_file) {
+            let black_weak = black_weak.clone();
+            let db_path = db_path.clone();
+            let masterkey_path = masterkey_path.clone();
+            slint::spawn_local(async move {
+                let db_file = match AsyncFileDialog::new()
+                    .set_file_name("exportada.db")
+                    .save_file()
+                    .await
+                {
+                    Some(handle) => handle.path().to_path_buf(),
+                    None => {
                         slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message(format!("Exportação da database falhou. {}", e).into()));
+                            black_weak.upgrade().map(|w| w.set_message("Exportação da database cancelada.".into()));
                         }).unwrap();
                         return;
                     }
-                    let masterkey_file = match AsyncFileDialog::new()
-                        .set_file_name("exportada.masterkey")
-                        .save_file()
-                        .await {
-                            Some(handle) => handle.path().to_path_buf(),
-                            None => {
-                                slint::invoke_from_event_loop(move || {
-                                    black_weak.upgrade().map(|w| w.set_message("Exportação da masterkey cancelada".into()));
-                                }).unwrap();
-                                return;
-                            }
-                        };
-                    match fs::copy(&masterkey_path, &masterkey_file) {
-                        Ok(_) => slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message("Database e masterkey exportadas com sucesso!".into()));
-                        }),
-                        Err(e) => slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message(format!("Exportação da masterkey falhou: {}", e).into()));
-                        }),
-                    }.unwrap();
+                };
+                if let Err(e) = tokio::fs::copy(&db_path, &db_file).await {
+                    slint::invoke_from_event_loop(move || {
+                        black_weak.upgrade().map(|w| w.set_message(format!("Exportação da database falhou. {}", e).into()));
+                    }).unwrap();
+                    return;
                 }
+                let masterkey_file = match AsyncFileDialog::new()
+                    .set_file_name("exportada.masterkey")
+                    .save_file()
+                    .await
+                {
+                    Some(handle) => handle.path().to_path_buf(),
+                    None => {
+                        slint::invoke_from_event_loop(move || {
+                            black_weak.upgrade().map(|w| w.set_message("Exportação da masterkey cancelada".into()));
+                        }).unwrap();
+                        return;
+                    }
+                };
+                match tokio::fs::copy(&masterkey_path, &masterkey_file).await {
+                    Ok(_) => slint::invoke_from_event_loop(move || {
+                        black_weak.upgrade().map(|w| w.set_message("Database e masterkey exportadas com sucesso!".into()));
+                    }),
+                    Err(e) => slint::invoke_from_event_loop(move || {
+                        black_weak.upgrade().map(|w| w.set_message(format!("Exportação da masterkey falhou: {}", e).into()));
+                    }),
+                }.unwrap();
             }).unwrap();
         }
     });
 }
 
-async fn start_websocket_server(
-    conn: Arc<Pool<SqliteConnectionManager>>,
-    ui_sender: Sender<UiUpdate>,
-    user_id: i32,
-) {
+async fn start_websocket_server(pool: Pool<Sqlite>, ui_sender: Sender<UiUpdate>, user_id: i32) {
     println!("Iniciando websocket no 127.0.0.1:9001...");
     let listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -704,14 +797,14 @@ async fn start_websocket_server(
             continue 'websocket_loop;
         }
     } {
-        let conn_clone = Arc::clone(&conn);
+        let pool_clone = pool.clone();
         let ui_sender_clone = ui_sender.clone();
         tokio::spawn(async move {
             if let Ok(ws_stream) = accept_async(stream).await {
                 let (mut write, mut read) = ws_stream.split();
                 while let Some(msg) = read.next().await {
                     if let Ok(Message::Text(text)) = msg {
-                        let response = process_websocket_message(&conn_clone, &text, &ui_sender_clone, user_id).await;
+                        let response = process_websocket_message(&pool_clone, &text, &ui_sender_clone, user_id).await;
                         let json_response = serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\":\"Erro de formatação: {}\"}}", e));
                         if write.send(Message::Text(json_response.into())).await.is_err() {
                             println!("Falha na mensagem do websocket, a terminar ligação...");
@@ -725,38 +818,31 @@ async fn start_websocket_server(
     println!("Websocket desligou.");
 }
 
-fn save_website_preference(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    user_id: i32,
-    website: &str,
-    save_password: bool,
-) -> Result<()> {
-    let conn = conn.get()?;
-    conn.execute(
-        "INSERT OR REPLACE INTO WebsitePreferences (user_id, website, save_password) VALUES (?1, ?2, ?3)",
-        params![user_id, website, save_password as i32],
-    )?;
+async fn save_website_preference(pool: &Pool<Sqlite>, user_id: i32, website: &str, save_password: bool) -> Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO WebsitePreferences (user_id, website, save_password) VALUES (?, ?, ?)"
+    )
+    .bind(user_id)
+    .bind(website)
+    .bind(save_password as i32)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
-fn get_website_preference(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    user_id: i32,
-    website: &str,
-) -> Result<bool> {
-    let conn = conn.get()?;
-    let save_password: Option<i32> = conn
-        .query_row(
-            "SELECT save_password FROM WebsitePreferences WHERE user_id = ?1 AND website = ?2",
-            params![user_id, website],
-            |row| row.get(0),
-        )
-        .optional()?;
+async fn get_website_preference(pool: &Pool<Sqlite>, user_id: i32, website: &str) -> Result<bool> {
+    let save_password: Option<i32> = sqlx::query_scalar(
+        "SELECT save_password FROM WebsitePreferences WHERE user_id = ? AND website = ?"
+    )
+    .bind(user_id)
+    .bind(website)
+    .fetch_optional(pool)
+    .await?;
     Ok(save_password.unwrap_or(1) != 0)
 }
 
 async fn process_websocket_message(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
+    pool: &Pool<Sqlite>,
     text: &str,
     ui_sender: &Sender<UiUpdate>,
     user_id: i32,
@@ -766,23 +852,24 @@ async fn process_websocket_message(
         t if t.starts_with("PREF:") => {
             let parts: Vec<&str> = t[5..].split("|").collect();
             if parts.len() == 3 {
-                save_field_preference(conn, parts[0], parts[1], parts[2])
-                    .map(|_| WebSocketResponse {
+                match save_field_preference(pool, parts[0], parts[1], parts[2]).await {
+                    Ok(_) => WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
-                        save_allowed: Some(get_website_preference(conn, user_id, parts[0]).unwrap_or(true)),
+                        save_allowed: Some(get_website_preference(pool, user_id, parts[0]).await.unwrap_or(true)),
                         error: None,
                         multiple_accounts: None,
-                    })
-                    .unwrap_or_else(|e| WebSocketResponse {
+                    },
+                    Err(e) => WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
                         save_allowed: None,
                         error: Some(e.to_string()),
                         multiple_accounts: None,
-                    })
+                    },
+                }
             } else {
                 WebSocketResponse {
                     password: None,
@@ -799,8 +886,8 @@ async fn process_websocket_message(
             if parts.len() == 2 {
                 let hostname = parts[0];
                 let role = parts[1];
-                retrieve_field_data(conn, user_id, hostname, role)
-                    .map(|(value, selector)| {
+                match retrieve_field_data(pool, user_id, hostname, role).await {
+                    Ok((value, selector)) => {
                         let mut response = WebSocketResponse {
                             password: None,
                             username_email: None,
@@ -808,7 +895,7 @@ async fn process_websocket_message(
                                 selector,
                                 role: role.to_string(),
                             }],
-                            save_allowed: Some(get_website_preference(conn, user_id, hostname).unwrap_or(true)),
+                            save_allowed: Some(get_website_preference(pool, user_id, hostname).await.unwrap_or(true)),
                             error: None,
                             multiple_accounts: None,
                         };
@@ -818,15 +905,16 @@ async fn process_websocket_message(
                             response.username_email = value;
                         }
                         response
-                    })
-                    .unwrap_or_else(|e| WebSocketResponse {
+                    },
+                    Err(e) => WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
                         save_allowed: None,
                         error: Some(e.to_string()),
                         multiple_accounts: None,
-                    })
+                    },
+                }
             } else {
                 WebSocketResponse {
                     password: None,
@@ -843,23 +931,24 @@ async fn process_websocket_message(
             if parts.len() == 2 {
                 let website = parts[0];
                 let save_password = parts[1] == "1";
-                save_website_preference(conn, user_id, website, save_password)
-                    .map(|_| WebSocketResponse {
+                match save_website_preference(pool, user_id, website, save_password).await {
+                    Ok(_) => WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
                         save_allowed: Some(save_password),
                         error: None,
                         multiple_accounts: None,
-                    })
-                    .unwrap_or_else(|e| WebSocketResponse {
+                    },
+                    Err(e) => WebSocketResponse {
                         password: None,
                         username_email: None,
                         preferences: Vec::new(),
                         save_allowed: None,
                         error: Some(e.to_string()),
                         multiple_accounts: None,
-                    })
+                    },
+                }
             } else {
                 WebSocketResponse {
                     password: None,
@@ -877,7 +966,7 @@ async fn process_websocket_message(
             if parts.len() == 5 {
                 let website = parts[0];
                 println!("Processing ADD_PASSWORD for website: {}", website);
-                if !get_website_preference(conn, user_id, website).unwrap_or(true) {
+                if !get_website_preference(pool, user_id, website).await.unwrap_or(true) {
                     let _ = ui_sender.send(UiUpdate::Error("Guardar passwords desligado para este website".to_string())).await;
                     return WebSocketResponse {
                         password: None,
@@ -888,14 +977,14 @@ async fn process_websocket_message(
                         multiple_accounts: None,
                     };
                 }
-                match add_password_with_selectors(conn, user_id, website, parts[1], parts[2], parts[3], parts[4]) {
+                match add_password_with_selectors(pool, user_id, website, parts[1], parts[2], parts[3], parts[4]).await {
                     Ok(()) => {
                         println!("Password recebida com sucesso, a atualizar ui");
-                        let conn_clone = Arc::clone(conn);
+                        let pool_clone = pool.clone();
                         let ui_sender_clone = ui_sender.clone();
                         tokio::spawn(async move {
                             let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                            let passwords = read_stored_passwords(&conn_clone, user_id, key)
+                            let passwords = read_stored_passwords(&pool_clone, user_id, key)
                                 .await
                                 .unwrap_or_default();
                             let _ = ui_sender_clone
@@ -920,7 +1009,7 @@ async fn process_websocket_message(
                             error: None,
                             multiple_accounts: None,
                         }
-                    }
+                    },
                     Err(e) => {
                         let error_message = e.to_string();
                         println!("Falha em adicionar password: {}", error_message);
@@ -951,7 +1040,7 @@ async fn process_websocket_message(
         }
         website => {
             println!("A processar autofill para: {}", website);
-            match retrieve_password_and_prefs(conn, user_id, website) {
+            match retrieve_password_and_prefs(pool, user_id, website).await {
                 Ok(credentials) => {
                     println!("Informação passada: {:?}", credentials);
                     if credentials.is_empty() {
@@ -959,19 +1048,19 @@ async fn process_websocket_message(
                             password: None,
                             username_email: None,
                             preferences: Vec::new(),
-                            save_allowed: Some(get_website_preference(conn, user_id, website).unwrap_or(true)),
+                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
                             error: None,
                             multiple_accounts: None,
                         };
                     }
-                    let prefs = credentials[0].2.clone(); // Now works with Clone
+                    let prefs = credentials[0].2.clone();
                     if credentials.len() == 1 {
                         let (password_opt, username_opt, _) = &credentials[0];
                         WebSocketResponse {
                             password: password_opt.clone(),
                             username_email: username_opt.clone(),
                             preferences: prefs,
-                            save_allowed: Some(get_website_preference(conn, user_id, website).unwrap_or(true)),
+                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
                             error: None,
                             multiple_accounts: None,
                         }
@@ -980,7 +1069,7 @@ async fn process_websocket_message(
                             password: None,
                             username_email: None,
                             preferences: prefs,
-                            save_allowed: Some(get_website_preference(conn, user_id, website).unwrap_or(true)),
+                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
                             error: None,
                             multiple_accounts: Some(
                                 credentials
@@ -1009,112 +1098,96 @@ async fn process_websocket_message(
     }
 }
 
-fn retrieve_field_data(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    user_id: i32,
-    website: &str,
-    role: &str,
-) -> Result<(Option<String>, String)> {
-    let db_conn = conn.get()?;
-    let selector: String = db_conn
-        .query_row(
-            "SELECT selector FROM FieldPreferences WHERE website = ?1 AND role = ?2",
-            params![website, role],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("No selector found for role {} on website {}", role, website))?;
+
+async fn retrieve_field_data(pool: &Pool<Sqlite>, user_id: i32, website: &str, role: &str) -> Result<(Option<String>, String)> {
+    let selector: String = sqlx::query_scalar(
+        "SELECT selector FROM FieldPreferences WHERE website = ? AND role = ?"
+    )
+    .bind(website)
+    .bind(role)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("No selector found for role {} on website {}", role, website))?;
+
     let value: Option<String> = if role == "password" {
-        retrieve_password(conn, user_id, website)?
+        retrieve_password(pool, user_id, website).await?
     } else {
-        db_conn.query_row(
-            "SELECT username_email FROM Passwords WHERE user_id = ?1 AND website = ?2",
-            params![user_id, website],
-            |row| row.get(0),
+        sqlx::query_scalar(
+            "SELECT username_email FROM Passwords WHERE user_id = ? AND website = ?"
         )
-        .optional()?
+        .bind(user_id)
+        .bind(website)
+        .fetch_optional(pool)
+        .await?
     };
     Ok((value, selector))
 }
 
-fn retrieve_password_and_prefs(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
+async fn retrieve_password_and_prefs(
+    pool: &Pool<Sqlite>,
     user_id: i32,
     website: &str,
 ) -> Result<Vec<(Option<String>, Option<String>, Vec<FieldPreference>)>> {
-    let key = ENCRYPTION_KEY
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?; // Simplified error for demo
-    let pooled_conn = conn.get()?;
-    
-    let mut stmt = pooled_conn.prepare(
-        "SELECT username_email, password FROM Passwords WHERE user_id = ?1 AND website = ?2",
-    )?;
-    let password_iter = stmt.query_map(params![user_id, website], |row| {
-        let username_email: String = row.get(0)?;
-        let encrypted_password: Vec<u8> = row.get(1)?;
-        let decrypted_password = decrypt(&encrypted_password, &key)
-            .map_err(|_e| rusqlite::Error::QueryReturnedNoRows)?; // Simplified error mapping
-        let decrypted_password_str = String::from_utf8(decrypted_password)
-            .map_err(|_e| rusqlite::Error::QueryReturnedNoRows)?; // Simplified error mapping
-        Ok((Some(decrypted_password_str), Some(username_email)))
-    })?;
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let rows = sqlx::query_as::<_, (String, Vec<u8>)>(
+        "SELECT username_email, password FROM Passwords WHERE user_id = ? AND website = ?"
+    )
+    .bind(user_id)
+    .bind(website)
+    .fetch_all(pool)
+    .await?;
 
     let mut credentials = Vec::new();
-    for cred_result in password_iter {
-        let (password_opt, username_opt) = cred_result?;
-        let prefs = get_field_preferences(conn, website)?;
-        credentials.push((password_opt, username_opt, prefs));
+    for (username_email, encrypted_password) in rows {
+        let decrypted_password = decrypt(&encrypted_password, &key)?;
+        let decrypted_password_str = String::from_utf8(decrypted_password)?;
+        let prefs = get_field_preferences(pool, website).await?;
+        credentials.push((Some(decrypted_password_str), Some(username_email), prefs));
     }
 
     Ok(credentials)
 }
 
-fn save_field_preference(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
-    website: &str,
-    selector: &str,
-    role: &str,
-) -> Result<()> {
+async fn save_field_preference(pool: &Pool<Sqlite>, website: &str, selector: &str, role: &str) -> Result<()> {
     if role != "Username" && role != "Password" {
         return Err(anyhow!("Invalid role: {}", role));
     }
-    let conn = conn.get()?;
-    conn.execute(
-        "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?1, ?2, ?3)",
-        params![website, selector, role],
-    )?;
-    println!(
-        "Saved preference: website={}, selector={}, role={}",
-        website, selector, role
-    );
+    sqlx::query(
+        "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)"
+    )
+    .bind(website)
+    .bind(selector)
+    .bind(role)
+    .execute(pool)
+    .await?;
+    println!("Saved preference: website={}, selector={}, role={}", website, selector, role);
     Ok(())
 }
 
-fn get_field_preferences(conn: &Arc<Pool<SqliteConnectionManager>>, website: &str) -> Result<Vec<FieldPreference>> {
-    let conn = conn.get()?;
-    let mut stmt = conn.prepare("SELECT selector, role FROM FieldPreferences WHERE website = ?1")?;
-    let pref_iter = stmt.query_map(params![website], |row| {
-        Ok(FieldPreference {
-            selector: row.get(0)?,
-            role: row.get(1)?,
-        })
-    })?;
-    pref_iter.collect::<Result<_, rusqlite::Error>>().map_err(|e| anyhow!(e))
+async fn get_field_preferences(pool: &Pool<Sqlite>, website: &str) -> Result<Vec<FieldPreference>> {
+    let rows = sqlx::query_as::<_, FieldPreference>(
+        "SELECT selector, role FROM FieldPreferences WHERE website = ?"
+    )
+    .bind(website)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
-fn retrieve_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str) -> Result<Option<String>> {
-    let conn = conn.get()?;
-    let mut stmt = conn.prepare("SELECT password FROM Passwords WHERE user_id = ?1 AND website = ?2")?;
-    let encrypted_password: Option<Vec<u8>> = stmt.query_row(params![user_id, website], |row| row.get(0)).optional()?;
+async fn retrieve_password(pool: &Pool<Sqlite>, user_id: i32, website: &str) -> Result<Option<String>> {
     let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let encrypted_password: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT password FROM Passwords WHERE user_id = ? AND website = ?"
+    )
+    .bind(user_id)
+    .bind(website)
+    .fetch_optional(pool)
+    .await?;
     Ok(encrypted_password.map(|ep| decrypt_password(&ep, &key).unwrap_or("Decryption failed".to_string())))
 }
 
-fn add_password_with_selectors(
-    conn: &Arc<Pool<SqliteConnectionManager>>,
+async fn add_password_with_selectors(
+    pool: &Pool<Sqlite>,
     user_id: i32,
     website: &str,
     username_email: &str,
@@ -1122,126 +1195,45 @@ fn add_password_with_selectors(
     username_selector: &str,
     password_selector: &str,
 ) -> Result<()> {
-    let key = ENCRYPTION_KEY
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| anyhow!("Chave de encriptção não definida={}", user_id))?;
-    println!("Chave de encriptação para: {}", user_id);
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Chave de encriptção não definida={}", user_id))?;
+    let encrypted_password = encrypt(password.as_bytes(), &key)?;
 
-    let encrypted_password = encrypt(password.as_bytes(), &key)
-        .map_err(|e| anyhow!("Falha ao encriptar password para website={}: {}", website, e))?;
-    println!("Password encriptada com sucesso para website={}", website);
+    let mut tx = pool.begin().await?;
+    let existing_id: Option<i32> = sqlx::query_scalar(
+        "SELECT id FROM Passwords WHERE user_id = ? AND website = ? AND username_email = ?"
+    )
+    .bind(user_id)
+    .bind(website)
+    .bind(username_email)
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    let mut pooled_conn = conn
-        .get()
-        .map_err(|e| anyhow!("Falha ao conectar com a database para website={}: {}", website, e))?;
-    println!("Database connection acquired for website={}", website);
-
-    {
-        let tx = pooled_conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| anyhow!("Falha na transação para website={}: {}", website, e))?;
-        println!("Started transaction for adding/updating password for website={}", website);
-
-        // Check if an entry exists for user_id, website, and username_email
-        let existing_id: Option<i32> = tx
-            .query_row(
-                "SELECT id FROM Passwords WHERE user_id = ?1 AND website = ?2 AND username_email = ?3",
-                params![user_id, website, username_email],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| anyhow!("Failed to check existing entry for website={}: {}", website, e))?;
-
-        if let Some(id) = existing_id {
-            // Update the existing password
-            match tx.execute(
-                "UPDATE Passwords SET password = ?1 WHERE id = ?2",
-                params![&encrypted_password, id],
-            ) {
-                Ok(rows) => println!(
-                    "Updated password for website={}, username={}, rows affected={}",
-                    website, username_email, rows
-                ),
-                Err(e) => {
-                    println!("Failed to update password: {}", e);
-                    tx.rollback()
-                        .map_err(|re| anyhow!("Rollback failed after update error: {}", re))?;
-                    return Err(anyhow!(
-                        "Failed to update password for website={}, username={}: {}",
-                        website, username_email, e
-                    ));
-                }
-            }
-        } else {
-            // Insert a new password entry
-            match tx.execute(
-                "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
-                params![user_id, website, username_email, &encrypted_password],
-            ) {
-                Ok(rows) => println!(
-                    "Inserted password for website={}, username={}, rows affected={}",
-                    website, username_email, rows
-                ),
-                Err(e) => {
-                    println!("Failed to insert password: {}", e);
-                    tx.rollback()
-                        .map_err(|re| anyhow!("Rollback failed after insert error: {}", re))?;
-                    return Err(anyhow!(
-                        "Failed to insert password for website={}, username={}: {}",
-                        website, username_email, e
-                    ));
-                }
-            }
-        }
-
-        // Update field preferences
-        for (selector, role) in [(username_selector, "Username"), (password_selector, "Password")] {
-            match tx.execute(
-                "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?1, ?2, ?3)",
-                params![website, selector, role],
-            ) {
-                Ok(_) => println!(
-                    "Saved preference: website={}, selector={}, role={}",
-                    website, selector, role
-                ),
-                Err(e) => {
-                    println!("Failed to save preference for website={}, role={}: {}", website, role, e);
-                    tx.rollback()
-                        .map_err(|re| anyhow!("Rollback failed after preference error: {}", re))?;
-                    return Err(anyhow!(
-                        "Failed to save preference for website={}, role={}: {}",
-                        website, role, e
-                    ));
-                }
-            }
-        }
-
-        tx.commit()
-            .map_err(|e| anyhow!("Failed to commit transaction for website={}: {}", website, e))?;
-        println!("Committed password and preferences for website={}", website);
+    if let Some(id) = existing_id {
+        sqlx::query("UPDATE Passwords SET password = ? WHERE id = ?")
+            .bind(&encrypted_password)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query("INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)")
+            .bind(user_id)
+            .bind(website)
+            .bind(username_email)
+            .bind(&encrypted_password)
+            .execute(&mut *tx)
+            .await?;
     }
 
-    // Verify the specific entry exists
-    let count: i32 = pooled_conn
-        .query_row(
-            "SELECT COUNT(*) FROM Passwords WHERE user_id = ?1 AND website = ?2 AND username_email = ?3",
-            params![user_id, website, username_email],
-            |row| row.get(0),
-        )
-        .map_err(|e| anyhow!("Failed to verify entry for website={}: {}", website, e))?;
-    println!("Password count for website={}, username={}: {}", website, username_email, count);
-    if count == 0 {
-        return Err(anyhow!(
-            "Password entry not found after operation for website={}, username={}",
-            website, username_email
-        ));
+    for (selector, role) in [(username_selector, "Username"), (password_selector, "Password")] {
+        sqlx::query("INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)")
+            .bind(website)
+            .bind(selector)
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
     }
 
-    let prefs = get_field_preferences(conn, website)?;
-    println!("Saved preferences for website={}: {:?}", website, prefs);
-    println!("Password and preferences successfully managed for website={}", website);
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1268,17 +1260,17 @@ fn spawn_ui_update_handler(weak_window: Weak<BlackSquareWindow>, mut ui_receiver
 
 fn setup_password_handlers(
     black_square_window: &BlackSquareWindow,
-    conn: &Arc<Pool<SqliteConnectionManager>>,
+    pool: &Pool<Sqlite>,
     user_id: i32,
     db_path: PathBuf,
     masterkey_path: PathBuf,
 ) {
     let black_weak = black_square_window.as_weak();
-    let conn = Arc::clone(conn);
+    let pool = pool.clone();
 
     black_square_window.on_save_password({
         let black_weak = black_weak.clone();
-        let conn = Arc::clone(&conn);
+        let pool = pool.clone();
         move || {
             let window = black_weak.upgrade().unwrap();
             let (website, username_email, password) = (
@@ -1293,15 +1285,15 @@ fn setup_password_handlers(
 
             slint::spawn_local({
                 let black_weak = black_weak.clone();
-                let conn = Arc::clone(&conn);
+                let pool = pool.clone();
                 async move {
                     let result = if window.get_isAddMode() {
-                        add_password(&conn, user_id, &website, &username_email, &password)
+                        add_password(&pool, user_id, &website, &username_email, &password).await
                     } else {
-                        update_password(&conn, window.get_id(), user_id, &website, &username_email, &password).await
+                        update_password(&pool, window.get_id(), user_id, &website, &username_email, &password).await
                     };
                     let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
+                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
                     slint::invoke_from_event_loop(move || {
                         if let Some(window) = black_weak.upgrade() {
                             match result {
@@ -1319,38 +1311,43 @@ fn setup_password_handlers(
     });
 
     black_square_window.on_websocket({
-        let black_weak = black_weak.clone();
-        let conn = Arc::clone(&conn);
-        move |enabled| {
-            let window = black_weak.upgrade().unwrap();
-            if enabled {
-                let (ui_sender, ui_receiver) = channel::<UiUpdate>(100);
-                let handle = tokio::spawn(start_websocket_server(Arc::clone(&conn), ui_sender, user_id));
-                *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
-                spawn_ui_update_handler(window.as_weak(), ui_receiver);
-                window.set_message("✅ Websocket Iniciado!".into());
-                window.set_websocket_enabled(true);
-            } else {
-                if let Some(shutdown_tx) = WEBSOCKET_SHUTDOWN.lock().unwrap().as_ref() {
-                    let _ = shutdown_tx.send(true);
-                    if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
-                        handle.abort();
-                        window.set_message("✅ WebSocket foi parado.".into());
-                    }
-                } else {
-                    window.set_message("❌ Sem websocket para parar.".into());
+    let black_weak = black_weak.clone();
+    let pool = pool.clone();
+    move |enabled| {
+        let window = black_weak.upgrade().unwrap();
+        if enabled {
+            let (ui_sender, ui_receiver) = channel::<UiUpdate>(100);
+            let handle = tokio::spawn(start_websocket_server(pool.clone(), ui_sender, user_id));
+            *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
+            spawn_ui_update_handler(window.as_weak(), ui_receiver);
+            window.set_message("✅ Websocket Iniciado!".into());
+            window.set_websocket_enabled(true);
+        } else {
+            if let Some(shutdown_tx) = WEBSOCKET_SHUTDOWN.lock().unwrap().as_ref() {
+                let _ = shutdown_tx.send(true);
+                if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
+                    handle.abort();
+                    slint::spawn_local(async move {
+                        if handle.await.is_ok() {  // Error at line 769
+                            println!("WebSocket task completed after abort");
+                        }
+                    }).unwrap();
+                    window.set_message("✅ WebSocket foi parado.".into());
                 }
-                window.set_websocket_enabled(false);
-                *WEBSOCKET_SHUTDOWN.lock().unwrap() = None;
+            } else {
+                window.set_message("❌ Sem websocket para parar.".into());
             }
+            window.set_websocket_enabled(false);
+            *WEBSOCKET_SHUTDOWN.lock().unwrap() = None;
         }
-    });
+    }
+});
 
     setup_export_handler(black_square_window, db_path.clone(), masterkey_path.clone());
 
     black_square_window.on_edit({
         let black_weak = black_weak.clone();
-        let conn = Arc::clone(&conn);
+        let pool = pool.clone();
         move |id, website, username_email, password| {
             let window = black_weak.upgrade().unwrap();
             let (website, username_email, password) = (website.to_string(), username_email.to_string(), password.to_string());
@@ -1361,11 +1358,11 @@ fn setup_password_handlers(
 
             slint::spawn_local({
                 let black_weak = black_weak.clone();
-                let conn = Arc::clone(&conn);
+                let pool = pool.clone();
                 async move {
-                    let result = update_password(&conn, id, user_id, &website, &username_email, &password).await;
+                    let result = update_password(&pool, id, user_id, &website, &username_email, &password).await;
                     let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
+                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
                     slint::invoke_from_event_loop(move || {
                         if let Some(window) = black_weak.upgrade() {
                             match result {
@@ -1384,15 +1381,15 @@ fn setup_password_handlers(
 
     black_square_window.on_deletePassword({
         let black_weak = black_weak.clone();
-        let conn = Arc::clone(&conn);
+        let pool = pool.clone();
         move |id| {
             slint::spawn_local({
                 let black_weak = black_weak.clone();
-                let conn = Arc::clone(&conn);
+                let pool = pool.clone();
                 async move {
-                    let result = delete_password(&conn, id, user_id).await;
+                    let result = delete_password(&pool, id, user_id).await;
                     let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&conn, user_id, key).await.unwrap_or_default();
+                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
                     slint::invoke_from_event_loop(move || {
                         if let Some(window) = black_weak.upgrade() {
                             match result {
@@ -1436,40 +1433,64 @@ fn hash_password(password: &str, salt: &SaltString) -> Result<String> {
     Ok(Argon2::default().hash_password(password.as_bytes(), salt).map_err(|e| anyhow!(e))?.to_string())
 }
 
-async fn export_hash_to_file(hash: &str, file_path: &Path) -> Result<()> {
-    let mut file = File::create(file_path).await?;
-    file.write_all(hash.as_bytes()).await?;
+fn derive_key(password: &str, salt: &str) -> Result<Vec<u8>> {
+    let salt = SaltString::from_b64(salt).map_err(|e| anyhow!("Invalid salt: {}", e))?;
+    let argon2 = Argon2::default();
+    let password_hash = argon2.hash_password(password.as_bytes(), &salt).map_err(|e| anyhow!(e))?;
+    Ok(password_hash.hash.ok_or_else(|| anyhow!("No hash output"))?.as_bytes().to_vec())
+}
+
+fn encrypt_password(plaintext: &str, key: &[u8]) -> Result<Vec<u8>> {
+    encrypt(plaintext.as_bytes(), key).map_err(|e| anyhow!("Encryption failed: {}", e))
+}
+
+fn decrypt_password(encrypted_data: &[u8], key: &[u8]) -> Result<String> {
+    let plaintext = decrypt(encrypted_data, key)?;
+    String::from_utf8(plaintext).map_err(|e| anyhow!("Invalid UTF-8 in decrypted data: {}", e))
+}
+
+async fn add_password(pool: &Pool<Sqlite>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
+    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let encrypted_password = encrypt_password(password, &key)?;
+    sqlx::query(
+        "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)"
+    )
+    .bind(user_id)
+    .bind(website)
+    .bind(username_email)
+    .bind(&encrypted_password)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
-fn add_password(conn: &Arc<Pool<SqliteConnectionManager>>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
+async fn update_password(pool: &Pool<Sqlite>, id: i32, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
     let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
     let encrypted_password = encrypt_password(password, &key)?;
-    let conn = conn.get()?;
-    conn.execute(
-        "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?1, ?2, ?3, ?4)",
-        params![user_id, website, username_email, &encrypted_password],
-    )?;
-    Ok(())
-}
-
-async fn update_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
-    let encrypted_password = encrypt_password(password, &key)?;
-    let conn = conn.get()?;
-    let rows_affected = conn.execute(
-        "UPDATE Passwords SET website = ?1, username_email = ?2, password = ?3 WHERE id = ?4 AND user_id = ?5",
-        params![website, username_email, &encrypted_password, id, user_id],
-    )?;
+    let rows_affected = sqlx::query(
+        "UPDATE Passwords SET website = ?, username_email = ?, password = ? WHERE id = ? AND user_id = ?"
+    )
+    .bind(website)
+    .bind(username_email)
+    .bind(&encrypted_password)
+    .bind(id)
+    .bind(user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     if rows_affected == 0 {
         return Err(anyhow!("No matching record found to update"));
     }
     Ok(())
 }
 
-async fn delete_password(conn: &Arc<Pool<SqliteConnectionManager>>, id: i32, user_id: i32) -> Result<()> {
-    let conn = conn.get()?;
-    let rows_affected = conn.execute("DELETE FROM Passwords WHERE id = ?1 AND user_id = ?2", params![id, user_id])?;
+async fn delete_password(pool: &Pool<Sqlite>, id: i32, user_id: i32) -> Result<()> {
+    let rows_affected = sqlx::query("DELETE FROM Passwords WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
     if rows_affected == 0 {
         return Err(anyhow!("No matching record found to delete"));
     }
@@ -1518,8 +1539,8 @@ fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
         app_name, app_path
     );
     let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
-    fs::create_dir_all(&autostart_dir)?;
-    fs::write(autostart_dir.join(format!("{}.desktop", app_name)), desktop_content)?;
+    tokio::fs::create_dir_all(&autostart_dir).block_on()?;
+    tokio::fs::write(autostart_dir.join(format!("{}.desktop", app_name)), desktop_content).block_on()?;
     Ok(())
 }
 
@@ -1528,7 +1549,7 @@ fn remove_from_startup(app_name: &str) -> Result<()> {
     let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
     let path = autostart_dir.join(format!("{}.desktop", app_name));
     if path.exists() {
-        fs::remove_file(path)?;
+        tokio::fs::remove_file(path).block_on()?;
     }
     Ok(())
 }
@@ -1559,8 +1580,8 @@ fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
         app_name, app_path
     );
     let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
-    fs::create_dir_all(&launch_agents_dir)?;
-    fs::write(launch_agents_dir.join(format!("com.{}.plist", app_name)), plist_content)?;
+    tokio::fs::create_dir_all(&launch_agents_dir).block_on()?;
+    tokio::fs::write(launch_agents_dir.join(format!("com.{}.plist", app_name)), plist_content).block_on()?;
     Ok(())
 }
 
@@ -1569,7 +1590,7 @@ fn remove_from_startup(app_name: &str) -> Result<()> {
     let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
     let path = launch_agents_dir.join(format!("com.{}.plist", app_name));
     if path.exists() {
-        fs::remove_file(path)?;
+        tokio::fs::remove_file(path).block_on()?;
     }
     Ok(())
 }
@@ -1591,25 +1612,8 @@ fn handle_logout(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindo
     black_square_window.hide().unwrap();
 }
 
-fn derive_key(password: &str, salt: &str) -> Result<Vec<u8>> {
-    let salt = SaltString::from_b64(salt).map_err(|e| anyhow!("Invalid salt: {}", e))?;
-    let argon2 = Argon2::default();
-    let password_hash = argon2.hash_password(password.as_bytes(), &salt).map_err(|e| anyhow!(e))?;
-    Ok(password_hash.hash.ok_or_else(|| anyhow!("No hash output"))?.as_bytes().to_vec())
-}
-
-fn encrypt_password(plaintext: &str, key: &[u8]) -> Result<Vec<u8>> {
-    encrypt(plaintext.as_bytes(), key).map_err(|e| anyhow!("Encryption failed: {}", e))
-}
-
-fn decrypt_password(encrypted_data: &[u8], key: &[u8]) -> Result<String> {
-    let plaintext = decrypt(encrypted_data, key)?;
-    String::from_utf8(plaintext).map_err(|e| anyhow!("Invalid UTF-8 in decrypted data: {}", e))
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    
     let ui = Arc::new(LoginWindow::new()?);
     let black_square_window = Arc::new(BlackSquareWindow::new()?);
 
@@ -1623,7 +1627,7 @@ async fn main() -> Result<()> {
     });
 
     setup_login_handler(&ui, &black_square_window);
-    setup_register_handler(ui.clone()).await;
+    let _ = setup_register_handler(ui.clone()).await;
     setup_import_handler(ui.clone(), black_square_window.clone()).await;
 
     let app_name = "EZPass";
