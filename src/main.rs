@@ -603,14 +603,16 @@ async fn setup_import_handler(ui: Arc<LoginWindow>, black_square_window: Arc<Bla
                                 let ui_weak = ui_weak.clone();
                                 let black_weak = black_weak.clone();
                                 move || {
-                                    if let Some(ui) = ui_weak.upgrade() {
-                                        ui.set_message("Database imported successfully!".into());
-                                        ui.hide().unwrap();
-                                    }
+                                    // Show the black square window first
                                     if let Some(window) = black_weak.upgrade() {
                                         window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
                                         window.show().unwrap();
                                         setup_password_handlers(&window, &pool, user_id, db_file.clone(), masterkey_file.clone());
+                                    }
+                                    // Then hide the login window
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        ui.set_message("Database imported successfully!".into());
+                                        ui.hide().unwrap();
                                     }
                                 }
                             })?;
@@ -1607,7 +1609,6 @@ fn decrypt_password(encrypted_data: &[u8], key: &[u8]) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
     
     let ui = Arc::new(LoginWindow::new()?);
     let black_square_window = Arc::new(BlackSquareWindow::new()?);
