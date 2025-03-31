@@ -155,30 +155,69 @@ async fn setup_database(db_path: &Path) -> Result<Arc<Pool<SqliteConnectionManag
     Ok(pool)
 }
 
-async fn import_database(db_file: &Path, masterkey_file: &Path) -> Result<()> {
+async fn import_database(db_file: &Path, masterkey_file: &Path, username: Option<&str>) -> Result<(i32, Arc<Pool<SqliteConnectionManager>>)> {
     let mut config = load_config()?;
     let name = db_file.file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("Nome da Database Inválido"))?;
+        .ok_or_else(|| anyhow!("Invalid database name"))?;
+
+    // Get unique destination path
+    let mut db_path = get_database_path(name);
+    let mut masterkey_path = db_path.with_extension("masterkey");
     
-    if config.databases.iter().any(|db| db.name == name) {
-        return Err(anyhow!("O nome da Database já existe"));
+    // If a database with this name exists, create a unique name
+    let mut counter = 1;
+    let base_name = name.to_string();
+    while config.databases.iter().any(|db| db.db_path == db_path) {
+        let new_name = format!("{}_{}", base_name, counter);
+        db_path = get_database_path(&new_name);
+        masterkey_path = db_path.with_extension("masterkey");
+        counter += 1;
     }
 
-    let db_path = get_database_path(name);
-    let masterkey_path = db_path.with_extension("masterkey");
-
+    // Copy the files to the new location
     fs::copy(db_file, &db_path)?;
     fs::copy(masterkey_file, &masterkey_path)?;
 
-    config.databases.push(DatabaseConfig {
-        name: name.to_string(),
-        db_path,
-        masterkey_path,
-    });
+    // Setup database connection
+    let pool = setup_database(&db_path).await?;
 
+    // Verify the database is valid by checking if we can read from it
+    let conn = pool.get()?;
+    let masterkey_hex = fs::read_to_string(&masterkey_path)?;
+    let masterkey = hex::decode(&masterkey_hex)
+        .map_err(|e| anyhow!("Invalid masterkey file: {}", e))?;
+
+    let username_to_check = username.unwrap_or_else(|| "default"); // Fallback if no username provided
+    let mut stmt = conn.prepare(
+        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
+    )?;
+    
+    let (user_id, enc_key_encrypted, enc_key_hash) = stmt.query_row(params![username_to_check], |row| {
+        Ok((row.get::<_, i32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?))
+    }).optional()?.ok_or_else(|| anyhow!("User not found in imported database"))?;
+
+    // Verify masterkey
+    let decrypted_key = decrypt(&enc_key_encrypted, &masterkey)?;
+    let mut hasher = Sha256::default();
+    hasher.update(&decrypted_key);
+    if hex::encode(hasher.finalize()) != enc_key_hash {
+        fs::remove_file(&db_path)?;
+        fs::remove_file(&masterkey_path)?;
+        return Err(anyhow!("Masterkey does not match the database"));
+    }
+
+    // Update config only if verification succeeds
+    config.databases.push(DatabaseConfig {
+        name: db_path.file_stem().unwrap().to_str().unwrap().to_string(),
+        db_path: db_path.clone(),
+        masterkey_path: masterkey_path.clone(),
+    });
     save_config(&config)?;
-    Ok(())
+
+    // Set encryption key and return pool with user_id for immediate use
+    *ENCRYPTION_KEY.lock().unwrap() = Some(decrypted_key);
+    Ok((user_id, pool))
 }
 
 async fn register_user(db_path: &Path, username: String, password: String) -> Result<Arc<Pool<SqliteConnectionManager>>> {
@@ -516,48 +555,71 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
     });
 }
 
-async fn setup_import_handler(ui: Arc<LoginWindow>) {
+async fn setup_import_handler(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindow>) {
     let ui_weak = ui.as_weak();
+    let black_weak = black_square_window.as_weak();
+    
     ui.on_importeddb({
         let ui_weak = ui_weak.clone();
+        let black_weak = black_weak.clone();
         move || {
             slint::spawn_local({
                 let ui_weak = ui_weak.clone();
+                let black_weak = black_weak.clone();
                 async move {
                     let db_file = match AsyncFileDialog::new()
-                        .set_title("Selecionar o arquivo de database para importar:")
+                        .set_title("Select database file to import:")
                         .add_filter("Database", &["db"])
                         .pick_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção da database cancelada".into()));
-                                }).unwrap();
-                                return;
+                                    ui_weak.upgrade().map(|ui| ui.set_message("Database selection canceled".into()));
+                                })?;
+                                return Ok::<(), anyhow::Error>(());
                             }
                         };
                     let masterkey_file = match AsyncFileDialog::new()
                         .set_title("Select Masterkey File")
-                        .add_filter("Text Files", &["txt"])
+                        .add_filter("Masterkey File", &["masterkey"])
                         .pick_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
                                 slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção da masterkey cancelada.".into()));
-                                }).unwrap();
-                                return;
+                                    ui_weak.upgrade().map(|ui| ui.set_message("Masterkey selection canceled.".into()));
+                                })?;
+                                return Ok(());
                             }
                         };
-                    match import_database(&db_file, &masterkey_file).await {
-                        Ok(()) => slint::invoke_from_event_loop(move || {
-                            ui_weak.upgrade().map(|ui| ui.set_message("Database importada com sucesso!".into()));
-                        }),
+
+                    match import_database(&db_file, &masterkey_file, Some(&ui_weak.upgrade().unwrap().get_username().to_string())).await {
+                        Ok((user_id, pool)) => {
+                            let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                            let passwords = read_stored_passwords(&pool, user_id, key).await?;
+                            
+                            slint::invoke_from_event_loop({
+                                let ui_weak = ui_weak.clone();
+                                let black_weak = black_weak.clone();
+                                move || {
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        ui.set_message("Database imported successfully!".into());
+                                        ui.hide().unwrap();
+                                    }
+                                    if let Some(window) = black_weak.upgrade() {
+                                        window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+                                        window.show().unwrap();
+                                        setup_password_handlers(&window, &pool, user_id, db_file.clone(), masterkey_file.clone());
+                                    }
+                                }
+                            })?;
+                        }
                         Err(e) => slint::invoke_from_event_loop(move || {
-                            ui_weak.upgrade().map(|ui| ui.set_message(format!("Importação falhou: {}", e).into()));
-                        }),
-                    }.unwrap();
+                            ui_weak.upgrade().map(|ui| ui.set_message(format!("Import failed: {}", e).into()));
+                        })?,
+                    }
+                    Ok(())
                 }
             }).unwrap();
         }
@@ -594,7 +656,7 @@ fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBu
                         return;
                     }
                     let masterkey_file = match AsyncFileDialog::new()
-                        .set_file_name("masterkey.txt")
+                        .set_file_name("exportada.masterkey")
                         .save_file()
                         .await {
                             Some(handle) => handle.path().to_path_buf(),
@@ -1561,7 +1623,7 @@ async fn main() -> Result<()> {
 
     setup_login_handler(&ui, &black_square_window);
     setup_register_handler(ui.clone()).await;
-    setup_import_handler(ui.clone()).await;
+    setup_import_handler(ui.clone(), black_square_window.clone()).await;
 
     let app_name = "EZPass";
     let app_path = std::env::current_exe()?.to_str().ok_or_else(|| anyhow!("Failed to get executable path"))?.to_string();
