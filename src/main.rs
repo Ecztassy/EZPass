@@ -23,6 +23,9 @@ use hex;
 use dirs;
 use tokio::fs;
 
+
+
+
 slint::include_modules!();
 
 static WEBSOCKET_TASK: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
@@ -30,6 +33,10 @@ static WEBSOCKET_SHUTDOWN: Lazy<Mutex<Option<watch::Sender<bool>>>> = Lazy::new(
 static ENCRYPTION_KEY: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
 
 const DATABASE_DIR: &str = "databases";
+
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: std::alloc::System = std::alloc::System;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct DatabaseConfig {
@@ -1409,22 +1416,41 @@ fn setup_password_handlers(
     black_square_window.on_toggle_autostart({
         let black_weak = black_weak.clone();
         move |enabled| {
-            let window = black_weak.upgrade().unwrap();
-            let app_name = "EZPass";
-            let exe_path = std::env::current_exe().unwrap().to_str().unwrap().to_string();
-            if enabled {
-                if let Err(e) = add_to_startup(app_name, &exe_path) {
-                    window.set_message(format!("❌ Falha ao ativar autostart: {}", e).into());
-                } else {
-                    window.set_message("✅ Autostart ativado".into());
+            let app_name = "EZPass".to_string(); // Clone to move into async block
+            let exe_path = std::env::current_exe().unwrap().to_str().unwrap().to_string(); // Clone to move into async block
+            
+            slint::spawn_local({
+                let window_weak = black_weak.clone();
+                async move {
+                    if enabled {
+                        match add_to_startup(&app_name, &exe_path).await {
+                            Err(e) => {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.set_message(format!("❌ Falha ao ativar autostart: {}", e).into());
+                                }
+                            }
+                            Ok(()) => {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.set_message("✅ Autostart ativado".into());
+                                }
+                            }
+                        }
+                    } else {
+                        match remove_from_startup(&app_name).await {
+                            Err(e) => {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.set_message(format!("❌ Falha ao desativar autostart: {}", e).into());
+                                }
+                            }
+                            Ok(()) => {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.set_message("✅ Autostart desativado".into());
+                                }
+                            }
+                        }
+                    }
                 }
-            } else {
-                if let Err(e) = remove_from_startup(app_name) {
-                    window.set_message(format!("❌ Falha ao desativar autostart: {}", e).into());
-                } else {
-                    window.set_message("✅ Autostart desativado".into());
-                }
-            }
+            }).unwrap(); // Spawn the async task
         }
     });
 }
@@ -1527,7 +1553,7 @@ fn is_in_startup(app_name: &str) -> Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
+async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
     let desktop_content = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
@@ -1539,23 +1565,23 @@ fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
         app_name, app_path
     );
     let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
-    tokio::fs::create_dir_all(&autostart_dir).block_on()?;
-    tokio::fs::write(autostart_dir.join(format!("{}.desktop", app_name)), desktop_content).block_on()?;
+    tokio::fs::create_dir_all(&autostart_dir).await?;
+    tokio::fs::write(autostart_dir.join(format!("{}.desktop", app_name)), desktop_content).await?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn remove_from_startup(app_name: &str) -> Result<()> {
+async fn remove_from_startup(app_name: &str) -> Result<()> {
     let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
     let path = autostart_dir.join(format!("{}.desktop", app_name));
     if path.exists() {
-        tokio::fs::remove_file(path).block_on()?;
+        tokio::fs::remove_file(path).await?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn is_in_startup(app_name: &str) -> Result<bool> {
+async fn is_in_startup(app_name: &str) -> Result<bool> {
     let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
     Ok(autostart_dir.join(format!("{}.desktop", app_name)).exists())
 }
@@ -1614,6 +1640,19 @@ fn handle_logout(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindo
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::env;
+        if let Ok(session_type) = env::var("XDG_SESSION_TYPE") {
+            match session_type.as_str() {
+                "wayland" => env::set_var("WINIT_UNIX_BACKEND", "wayland"),
+                "x11" => env::set_var("WINIT_UNIX_BACKEND", "x11"),
+                _ => println!("Unknown session type: {}, letting winit choose the backend", session_type),
+            }
+        } else {
+            println!("XDG_SESSION_TYPE not set, letting winit choose the backend");
+        }
+    }
     let ui = Arc::new(LoginWindow::new()?);
     let black_square_window = Arc::new(BlackSquareWindow::new()?);
 
@@ -1627,14 +1666,17 @@ async fn main() -> Result<()> {
     });
 
     setup_login_handler(&ui, &black_square_window);
-    let _ = setup_register_handler(ui.clone()).await;
-    setup_import_handler(ui.clone(), black_square_window.clone()).await;
+    setup_register_handler(ui.clone()).await;  // Await and propagate errors
+    setup_import_handler(ui.clone(), black_square_window.clone()).await;  // Await and propagate errors
 
     let app_name = "EZPass";
-    let app_path = std::env::current_exe()?.to_str().ok_or_else(|| anyhow!("Failed to get executable path"))?.to_string();
-    if let Ok(is_enabled) = is_in_startup(app_name) {
+    let app_path = std::env::current_exe()?
+        .to_str()
+        .ok_or_else(|| anyhow!("Failed to get executable path"))?
+        .to_string();
+    if let Ok(is_enabled) = is_in_startup(app_name).await {  // Await the Future
         black_square_window.set_autostart_enabled(is_enabled);
-    } else if add_to_startup(app_name, &app_path).is_ok() {
+    } else if add_to_startup(app_name, &app_path).await.is_ok() {  // Await the Future
         black_square_window.set_autostart_enabled(true);
     }
 
