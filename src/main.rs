@@ -1524,7 +1524,7 @@ async fn delete_password(pool: &Pool<Sqlite>, id: i32, user_id: i32) -> Result<(
 }
 
 #[cfg(target_os = "windows")]
-fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
+async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -1534,7 +1534,7 @@ fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn remove_from_startup(app_name: &str) -> Result<()> {
+async fn remove_from_startup(app_name: &str) -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -1544,7 +1544,7 @@ fn remove_from_startup(app_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn is_in_startup(app_name: &str) -> Result<bool> {
+async fn is_in_startup(app_name: &str) -> Result<bool> {
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -1587,7 +1587,7 @@ async fn is_in_startup(app_name: &str) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
-fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
+async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
     let plist_content = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -1612,7 +1612,7 @@ fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn remove_from_startup(app_name: &str) -> Result<()> {
+async fn remove_from_startup(app_name: &str) -> Result<()> {
     let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
     let path = launch_agents_dir.join(format!("com.{}.plist", app_name));
     if path.exists() {
@@ -1622,7 +1622,7 @@ fn remove_from_startup(app_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn is_in_startup(app_name: &str) -> Result<bool> {
+async fn is_in_startup(app_name: &str) -> Result<bool> {
     let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
     Ok(launch_agents_dir.join(format!("com.{}.plist", app_name)).exists())
 }
