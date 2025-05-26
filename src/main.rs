@@ -2,34 +2,35 @@
 use std::sync::Arc;
 use rand::RngCore;
 use rfd::AsyncFileDialog;
-use slint::{ModelRc, VecModel, Weak};
+use slint::{ ModelRc, VecModel, Weak };
 use rand::rngs::OsRng;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
-use anyhow::{Result, anyhow};
-use sha2::{Sha256, Digest};
-use std::path::{Path, PathBuf};
+use argon2::{ Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString };
+use anyhow::{ Result, anyhow };
+use sha2::{ Sha256, Digest };
+use std::path::{ Path, PathBuf };
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
-use futures_util::{StreamExt, SinkExt};
-use sqlx::{Pool, SqlitePool, Sqlite, sqlite::SqlitePoolOptions};
-use serde::{Serialize, Deserialize};
+use tokio_tungstenite::{ accept_async, tungstenite::Message };
+use futures_util::{ StreamExt, SinkExt };
+use sqlx::{ Pool, SqlitePool, Sqlite, sqlite::SqlitePoolOptions };
+use serde::{ Serialize, Deserialize };
 use serde_json;
-use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::sync::mpsc::{ channel, Sender, Receiver };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-use simple_crypt::{encrypt, decrypt};
+use simple_crypt::{ encrypt, decrypt };
 use hex;
 use dirs;
 use tokio::fs;
 
-
-
-
 slint::include_modules!();
 
-static WEBSOCKET_TASK: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
-static WEBSOCKET_SHUTDOWN: Lazy<Mutex<Option<watch::Sender<bool>>>> = Lazy::new(|| Mutex::new(None));
+static WEBSOCKET_TASK: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> = Lazy::new(||
+    Mutex::new(None)
+);
+static WEBSOCKET_SHUTDOWN: Lazy<Mutex<Option<watch::Sender<bool>>>> = Lazy::new(||
+    Mutex::new(None)
+);
 static ENCRYPTION_KEY: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
 
 const DATABASE_DIR: &str = "databases";
@@ -74,7 +75,8 @@ struct FieldPreference {
 }
 
 fn get_database_path(name: &str) -> PathBuf {
-    let dir = dirs::data_dir()
+    let dir = dirs
+        ::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass")
         .join(DATABASE_DIR);
@@ -82,7 +84,8 @@ fn get_database_path(name: &str) -> PathBuf {
 }
 
 async fn load_config() -> Result<Config> {
-    let config_dir = dirs::config_dir()
+    let config_dir = dirs
+        ::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass");
     tokio::fs::create_dir_all(&config_dir).await?;
@@ -96,7 +99,8 @@ async fn load_config() -> Result<Config> {
 }
 
 async fn save_config(config: &Config) -> Result<()> {
-    let config_dir = dirs::config_dir()
+    let config_dir = dirs
+        ::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("EZPass");
     tokio::fs::create_dir_all(&config_dir).await?;
@@ -120,13 +124,13 @@ async fn setup_database(db_path: &Path) -> Result<SqlitePool, anyhow::Error> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(2)
-        .connect(&db_url)
-        .await
+        .connect(&db_url).await
         .map_err(|e| anyhow!("Failed to connect to database: {}", e))?;
 
     println!("Database connected, creating tables...");
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS users (
+    sqlx
+        ::query(
+            "CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             password TEXT NOT NULL CHECK(length(password) <= 128),
@@ -158,10 +162,9 @@ async fn setup_database(db_path: &Path) -> Result<SqlitePool, anyhow::Error> {
             UNIQUE(user_id, website),
             FOREIGN KEY (user_id) REFERENCES users(id)
         );"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| anyhow!("Failed to create tables: {}", e))?;
+        )
+        .execute(&pool).await
+        .map_err(|e| anyhow!("Failed to create tables: {}", e))?;
 
     println!("Tables created successfully");
     Ok(pool)
@@ -170,7 +173,7 @@ async fn setup_database(db_path: &Path) -> Result<SqlitePool, anyhow::Error> {
 async fn import_database(
     db_file: &Path,
     masterkey_file: &Path,
-    username: Option<&str>,
+    username: Option<&str>
 ) -> Result<(i32, Pool<Sqlite>)> {
     let mut config = load_config().await?;
     let name = db_file
@@ -190,12 +193,6 @@ async fn import_database(
         counter += 1;
     }
 
-    // Log paths for debugging
-    println!("Source db_file: {:?}", db_file);
-    println!("Source masterkey_file: {:?}", masterkey_file);
-    println!("Target db_path: {:?}", db_path);
-    println!("Target masterkey_path: {:?}", masterkey_path);
-
     // Ensure the target directory exists
     if let Some(parent) = db_path.parent() {
         println!("Creating directory: {:?}", parent);
@@ -209,43 +206,52 @@ async fn import_database(
         return Err(anyhow!("Source database file does not exist: {:?}", db_file));
     }
     if !masterkey_file.exists() {
-        return Err(anyhow!(
-            "Source masterkey file does not exist: {:?}",
-            masterkey_file
-        ));
+        return Err(anyhow!("Source masterkey file does not exist: {:?}", masterkey_file));
     }
-    tokio::fs::copy(db_file, &db_path)
-        .await
-        .map_err(|e| anyhow!("Failed to copy database file from {:?} to {:?}: {}", db_file, db_path, e))?;
-    tokio::fs::copy(masterkey_file, &masterkey_path)
-        .await
-        .map_err(|e| anyhow!("Failed to copy masterkey file from {:?} to {:?}: {}", masterkey_file, masterkey_path, e))?;
+    tokio::fs
+        ::copy(db_file, &db_path).await
+        .map_err(|e|
+            anyhow!("Failed to copy database file from {:?} to {:?}: {}", db_file, db_path, e)
+        )?;
+    tokio::fs
+        ::copy(masterkey_file, &masterkey_path).await
+        .map_err(|e|
+            anyhow!(
+                "Failed to copy masterkey file from {:?} to {:?}: {}",
+                masterkey_file,
+                masterkey_path,
+                e
+            )
+        )?;
 
     // Set up database connection
     let pool = setup_database(&db_path).await?;
 
     // Read and verify masterkey
-    let masterkey_hex = tokio::fs::read_to_string(&masterkey_path)
-        .await
+    let masterkey_hex = tokio::fs
+        ::read_to_string(&masterkey_path).await
         .map_err(|e| anyhow!("Failed to read masterkey file {:?}: {}", masterkey_path, e))?;
-    let masterkey = hex::decode(&masterkey_hex)
+    let masterkey = hex
+        ::decode(&masterkey_hex)
         .map_err(|e| anyhow!("Invalid masterkey format in {:?}: {}", masterkey_path, e))?;
 
     // Verify user and encryption key
     let username_to_check = username.unwrap_or("default");
-    let row = sqlx::query_as::<_, (i32, Vec<u8>, String)>(
-        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?",
-    )
-    .bind(username_to_check)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| anyhow!("Database query failed: {}", e))?;
+    let row = sqlx
+        ::query_as::<_, (i32, Vec<u8>, String)>(
+            "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
+        )
+        .bind(username_to_check)
+        .fetch_optional(&pool).await
+        .map_err(|e| anyhow!("Database query failed: {}", e))?;
 
-    let (user_id, enc_key_encrypted, enc_key_hash) = row
-        .ok_or_else(|| anyhow!("User '{}' not found in imported database", username_to_check))?;
+    let (user_id, enc_key_encrypted, enc_key_hash) = row.ok_or_else(||
+        anyhow!("User '{}' not found in imported database", username_to_check)
+    )?;
 
-    let decrypted_key = decrypt(&enc_key_encrypted, &masterkey)
-        .map_err(|e| anyhow!("Failed to decrypt encryption key: {}", e))?;
+    let decrypted_key = decrypt(&enc_key_encrypted, &masterkey).map_err(|e|
+        anyhow!("Failed to decrypt encryption key: {}", e)
+    )?;
     let mut hasher = Sha256::default();
     hasher.update(&decrypted_key);
     if hex::encode(hasher.finalize()) != enc_key_hash {
@@ -265,16 +271,18 @@ async fn import_database(
         db_path: db_path.clone(),
         masterkey_path: masterkey_path.clone(),
     });
-    save_config(&config)
-        .await
-        .map_err(|e| anyhow!("Failed to save config: {}", e))?;
+    save_config(&config).await.map_err(|e| anyhow!("Failed to save config: {}", e))?;
 
     *ENCRYPTION_KEY.lock().unwrap() = Some(decrypted_key);
     println!("Database imported successfully: {:?}", db_path);
     Ok((user_id, pool))
 }
 
-async fn register_user(db_path: &Path, username: String, password: String) -> Result<SqlitePool, Box<dyn std::error::Error>> {
+async fn register_user(
+    db_path: &Path,
+    username: String,
+    password: String
+) -> Result<SqlitePool, Box<dyn std::error::Error>> {
     let salt = SaltString::generate(&mut OsRng);
     let hashed_password = hash_password(&password, &salt)?;
 
@@ -296,17 +304,17 @@ async fn register_user(db_path: &Path, username: String, password: String) -> Re
     fs::write(&masterkey_path, hex::encode(&masterkey)).await?;
 
     let pool = setup_database(db_path).await?;
-    sqlx::query(
-        "INSERT INTO users (username, password, salt, enc_key_encrypted_with_pwd, enc_key_encrypted_with_masterkey, enc_key_hash) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&username)
-    .bind(&hashed_password)
-    .bind(salt.as_str())
-    .bind(&enc_key_encrypted_with_pwd)
-    .bind(&enc_key_encrypted_with_masterkey)
-    .bind(&enc_key_hash)
-    .execute(&pool)
-    .await?;
+    sqlx
+        ::query(
+            "INSERT INTO users (username, password, salt, enc_key_encrypted_with_pwd, enc_key_encrypted_with_masterkey, enc_key_hash) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&username)
+        .bind(&hashed_password)
+        .bind(salt.as_str())
+        .bind(&enc_key_encrypted_with_pwd)
+        .bind(&enc_key_encrypted_with_masterkey)
+        .bind(&enc_key_hash)
+        .execute(&pool).await?;
 
     *ENCRYPTION_KEY.lock().unwrap() = Some(enc_key);
     Ok(pool)
@@ -316,15 +324,15 @@ async fn check_login(
     db_path: &Path,
     username: &str,
     password: &str,
-    black_square_window_handle: Weak<BlackSquareWindow>,
+    black_square_window_handle: Weak<BlackSquareWindow>
 ) -> Result<(bool, i32, Pool<Sqlite>)> {
     let pool = setup_database(db_path).await?;
-    let row = sqlx::query_as::<_, (i32, String, String, Vec<u8>, String)>(
-        "SELECT id, password, salt, enc_key_encrypted_with_pwd, enc_key_hash FROM users WHERE username = ?"
-    )
-    .bind(username)
-    .fetch_optional(&pool)
-    .await?;
+    let row = sqlx
+        ::query_as::<_, (i32, String, String, Vec<u8>, String)>(
+            "SELECT id, password, salt, enc_key_encrypted_with_pwd, enc_key_hash FROM users WHERE username = ?"
+        )
+        .bind(username)
+        .fetch_optional(&pool).await?;
 
     if let Some((user_id, stored_password, salt, enc_key_encrypted_with_pwd, enc_key_hash)) = row {
         let parsed_hash = PasswordHash::new(&stored_password).map_err(|e| anyhow!(e))?;
@@ -360,17 +368,19 @@ async fn check_masterkey_login(
     db_path: &Path,
     masterkey_path: &Path,
     username: &str,
-    black_square_window_handle: Weak<BlackSquareWindow>,
+    black_square_window_handle: Weak<BlackSquareWindow>
 ) -> Result<(bool, i32, Pool<Sqlite>)> {
     let masterkey_hex = tokio::fs::read_to_string(masterkey_path).await?;
-    let masterkey = hex::decode(&masterkey_hex).map_err(|e| anyhow!("Arquivo masterkey inválido: {}", e))?;
+    let masterkey = hex
+        ::decode(&masterkey_hex)
+        .map_err(|e| anyhow!("Arquivo masterkey inválido: {}", e))?;
     let pool = setup_database(db_path).await?;
-    let row = sqlx::query_as::<_, (i32, Vec<u8>, String)>(
-        "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
-    )
-    .bind(username)
-    .fetch_optional(&pool)
-    .await?;
+    let row = sqlx
+        ::query_as::<_, (i32, Vec<u8>, String)>(
+            "SELECT id, enc_key_encrypted_with_masterkey, enc_key_hash FROM users WHERE username = ?"
+        )
+        .bind(username)
+        .fetch_optional(&pool).await?;
 
     if let Some((user_id, enc_key_encrypted_with_masterkey, enc_key_hash)) = row {
         let enc_key_candidate = decrypt(&enc_key_encrypted_with_masterkey, &masterkey)?;
@@ -398,23 +408,32 @@ async fn check_masterkey_login(
     Ok((false, 0, pool))
 }
 
-async fn read_stored_passwords(pool: &Pool<Sqlite>, user_id: i32, key: Vec<u8>) -> Result<Vec<PasswordEntry>> {
-    let rows = sqlx::query_as::<_, (i32, String, String, Vec<u8>)>(
-        "SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?"
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+async fn read_stored_passwords(
+    pool: &Pool<Sqlite>,
+    user_id: i32,
+    key: Vec<u8>
+) -> Result<Vec<PasswordEntry>> {
+    let rows = sqlx
+        ::query_as::<_, (i32, String, String, Vec<u8>)>(
+            "SELECT id, website, username_email, password FROM Passwords WHERE user_id = ?"
+        )
+        .bind(user_id)
+        .fetch_all(pool).await?;
 
-    let passwords = rows.into_iter().map(|(id, website, username_email, encrypted_password)| {
-        let password = decrypt_password(&encrypted_password, &key).unwrap_or_else(|e| format!("Formatação falhou {}", e));
-        PasswordEntry {
-            id,
-            website: website.into(),
-            username_email: username_email.into(),
-            password: password.into(),
-        }
-    }).collect();
+    let passwords = rows
+        .into_iter()
+        .map(|(id, website, username_email, encrypted_password)| {
+            let password = decrypt_password(&encrypted_password, &key).unwrap_or_else(|e|
+                format!("Formatação falhou {}", e)
+            );
+            PasswordEntry {
+                id,
+                website: website.into(),
+                username_email: username_email.into(),
+                password: password.into(),
+            }
+        })
+        .collect();
 
     Ok(passwords)
 }
@@ -428,58 +447,88 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
         let black_weak = black_weak.clone();
         move || {
             let ui = ui_weak.upgrade().unwrap();
-            let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
+            let (username, password) = (
+                ui.get_username().to_string(),
+                ui.get_password().to_string(),
+            );
             if username.is_empty() || password.is_empty() {
                 ui.set_message("Por favor ensira o nome de utilizador e password.".into());
                 return;
             }
 
-            slint::spawn_local({
-                let ui_weak = ui_weak.clone();
-                let black_weak = black_weak.clone();
-                async move {
-                    let db_path = match AsyncFileDialog::new()
-                        .set_title("Selecionar arquivo de DB.")
-                        .pick_file()
-                        .await {
+            slint
+                ::spawn_local({
+                    let ui_weak = ui_weak.clone();
+                    let black_weak = black_weak.clone();
+                    async move {
+                        let db_path = match
+                            AsyncFileDialog::new()
+                                .set_title("Selecionar arquivo de DB.")
+                                .pick_file().await
+                        {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
-                                slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção cancelada".into()));
-                                }).unwrap();
+                                slint
+                                    ::invoke_from_event_loop(move || {
+                                        ui_weak
+                                            .upgrade()
+                                            .map(|ui| ui.set_message("Seleção cancelada".into()));
+                                    })
+                                    .unwrap();
                                 return;
                             }
                         };
-                    let config = load_config().await.unwrap();
-                    let masterkey_path = config.databases.iter()
-                        .find(|db| db.db_path == db_path)
-                        .map(|c| c.masterkey_path.clone())
-                        .unwrap_or_else(|| db_path.with_extension("masterkey"));
+                        let config = load_config().await.unwrap();
+                        let masterkey_path = config.databases
+                            .iter()
+                            .find(|db| db.db_path == db_path)
+                            .map(|c| c.masterkey_path.clone())
+                            .unwrap_or_else(|| db_path.with_extension("masterkey"));
 
-                    let result = check_login(&db_path, &username, &password, black_weak.clone()).await;
-                    slint::invoke_from_event_loop({
-                        let ui_weak = ui_weak.clone();
-                        let black_weak = black_weak.clone();
-                        move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                match result {
-                                    Ok((true, user_id, pool)) => {
-                                        ui.set_message("Login bem-sucessido!".into());
-                                        ui.set_username("".into());
-                                        ui.set_password("".into());
-                                        ui.hide().unwrap();
-                                        if let Some(window) = black_weak.upgrade() {
-                                            setup_password_handlers(&window, &pool, user_id, db_path, masterkey_path);
+                        let result = check_login(
+                            &db_path,
+                            &username,
+                            &password,
+                            black_weak.clone()
+                        ).await;
+                        slint
+                            ::invoke_from_event_loop({
+                                let ui_weak = ui_weak.clone();
+                                let black_weak = black_weak.clone();
+                                move || {
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        match result {
+                                            Ok((true, user_id, pool)) => {
+                                                ui.set_message("Login bem-sucessido!".into());
+                                                ui.set_username("".into());
+                                                ui.set_password("".into());
+                                                ui.hide().unwrap();
+                                                if let Some(window) = black_weak.upgrade() {
+                                                    setup_password_handlers(
+                                                        &window,
+                                                        &pool,
+                                                        user_id,
+                                                        db_path,
+                                                        masterkey_path
+                                                    );
+                                                }
+                                            }
+                                            Ok((false, _, _)) =>
+                                                ui.set_message(
+                                                    "Utilizador e password inválida.".into()
+                                                ),
+                                            Err(e) =>
+                                                ui.set_message(
+                                                    format!("Erro de login: {}", e).into()
+                                                ),
                                         }
                                     }
-                                    Ok((false, _, _)) => ui.set_message("Utilizador e password inválida.".into()),
-                                    Err(e) => ui.set_message(format!("Erro de login: {}", e).into()),
                                 }
-                            }
-                        }
-                    }).unwrap();
-                }
-            }).unwrap();
+                            })
+                            .unwrap();
+                    }
+                })
+                .unwrap();
         }
     });
 
@@ -494,57 +543,83 @@ fn setup_login_handler(ui: &Arc<LoginWindow>, black_square_window: &Arc<BlackSqu
                 return;
             }
 
-            slint::spawn_local({
-                let ui_weak = ui_weak.clone();
-                let black_weak = black_weak.clone();
-                async move {
-                    let db_path = match AsyncFileDialog::new()
-                        .set_title("Selecionar arquivo de DB")
-                        .pick_file()
-                        .await {
+            slint
+                ::spawn_local({
+                    let ui_weak = ui_weak.clone();
+                    let black_weak = black_weak.clone();
+                    async move {
+                        let db_path = match
+                            AsyncFileDialog::new()
+                                .set_title("Selecionar arquivo de DB")
+                                .pick_file().await
+                        {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
-                                slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção cancelada".into()));
-                                }).unwrap();
+                                slint
+                                    ::invoke_from_event_loop(move || {
+                                        ui_weak
+                                            .upgrade()
+                                            .map(|ui| ui.set_message("Seleção cancelada".into()));
+                                    })
+                                    .unwrap();
                                 return;
                             }
                         };
-                    let masterkey_path = match AsyncFileDialog::new()
-                        .set_title("Selecionar chave")
-                        .pick_file()
-                        .await {
+                        let masterkey_path = match
+                            AsyncFileDialog::new().set_title("Selecionar chave").pick_file().await
+                        {
                             Some(handle) => handle.path().to_path_buf(),
                             None => {
-                                slint::invoke_from_event_loop(move || {
-                                    ui_weak.upgrade().map(|ui| ui.set_message("Seleção cancelada".into()));
-                                }).unwrap();
+                                slint
+                                    ::invoke_from_event_loop(move || {
+                                        ui_weak
+                                            .upgrade()
+                                            .map(|ui| ui.set_message("Seleção cancelada".into()));
+                                    })
+                                    .unwrap();
                                 return;
                             }
                         };
 
-                    let result = check_masterkey_login(&db_path, &masterkey_path, &username, black_weak.clone()).await;
-                    slint::invoke_from_event_loop({
-                        let ui_weak = ui_weak.clone();
-                        let black_weak = black_weak.clone();
-                        move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                match result {
-                                    Ok((true, user_id, pool)) => {
-                                        ui.set_message("Login com a masterkey bem sucedida!".into());
-                                        ui.hide().unwrap();
-                                        if let Some(window) = black_weak.upgrade() {
-                                            setup_password_handlers(&window, &pool, user_id, db_path, masterkey_path);
+                        let result = check_masterkey_login(
+                            &db_path,
+                            &masterkey_path,
+                            &username,
+                            black_weak.clone()
+                        ).await;
+                        slint
+                            ::invoke_from_event_loop({
+                                let ui_weak = ui_weak.clone();
+                                let black_weak = black_weak.clone();
+                                move || {
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        match result {
+                                            Ok((true, user_id, pool)) => {
+                                                ui.set_message(
+                                                    "Login com a masterkey bem sucedida!".into()
+                                                );
+                                                ui.hide().unwrap();
+                                                if let Some(window) = black_weak.upgrade() {
+                                                    setup_password_handlers(
+                                                        &window,
+                                                        &pool,
+                                                        user_id,
+                                                        db_path,
+                                                        masterkey_path
+                                                    );
+                                                }
+                                            }
+                                            Ok((false, _, _)) =>
+                                                ui.set_message("Masterkey inválida.".into()),
+                                            Err(e) => ui.set_message(format!("Erro: {}", e).into()),
                                         }
                                     }
-                                    Ok((false, _, _)) => ui.set_message("Masterkey inválida.".into()),
-                                    Err(e) => ui.set_message(format!("Erro: {}", e).into()),
                                 }
-                            }
-                        }
-                    }).unwrap();
-                }
-            }).unwrap();
+                            })
+                            .unwrap();
+                    }
+                })
+                .unwrap();
         }
     });
 }
@@ -556,100 +631,127 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
         move || {
             let ui = match ui_weak.upgrade() {
                 Some(ui) => ui,
-                None => return, // UI gone, exit silently
+                None => {
+                    return;
+                } // UI gone, exit silently
             };
-            let (username, password) = (ui.get_username().to_string(), ui.get_password().to_string());
+            let (username, password) = (
+                ui.get_username().to_string(),
+                ui.get_password().to_string(),
+            );
             if username.is_empty() || password.is_empty() {
                 ui.set_message("Por favor insira utilizador e password.".into());
                 return;
             }
 
             let ui_weak_inner = ui_weak.clone();
-            match slint::spawn_local(async move {
-                let dialog = AsyncFileDialog::new()
-                    .set_file_name("Nova_database.db")
-                    .set_title("Salvar Nova Database");
-                let db_path = match dialog.save_file().await {
-                    Some(handle) => {
-                        let path = handle.path().to_path_buf();
-                        println!("Selected db_path: {:?}", path); // Log the path
-                        if let Some(parent) = path.parent() {
-                            println!("Creating directory: {:?}", parent);
-                            if let Err(e) = fs::create_dir_all(parent).await {
-                                println!("Failed to create directory: {}", e);
-                                slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = ui_weak_inner.upgrade() {
-                                        ui.set_message(format!("Falha ao criar diretório: {}", e).into());
-                                    }
-                                }).ok();
-                                return;
-                            }
-                            println!("Directory created successfully: {:?}", parent);
-                        }
-                        path
-                    }
-                    None => {
-                        println!("Save file dialog canceled");
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak_inner.upgrade() {
-                                ui.set_message("Registro cancelado".into());
-                            }
-                        }).ok();
-                        return;
-                    }
-                };
-
-                println!("Attempting to register user with db_path: {:?}", db_path);
-                let db_name = db_path.file_stem().unwrap().to_str().unwrap().to_string();
-                match register_user(&db_path, username, password).await {
-                    Ok(_pool) => {
-                        match load_config().await {
-                            Ok(mut config) => {
-                                if !config.databases.iter().any(|db| db.db_path == db_path) {
-                                    config.databases.push(DatabaseConfig {
-                                        name: db_name,
-                                        db_path: db_path.clone(),
-                                        masterkey_path: db_path.with_extension("masterkey"),
-                                    });
-                                    if let Err(e) = save_config(&config).await {
-                                        println!("Failed to save config: {}", e);
-                                        slint::invoke_from_event_loop(move || {
+            match
+                slint::spawn_local(async move {
+                    let dialog = AsyncFileDialog::new()
+                        .set_file_name("Nova_database.db")
+                        .set_title("Salvar Nova Database");
+                    let db_path = match dialog.save_file().await {
+                        Some(handle) => {
+                            let path = handle.path().to_path_buf();
+                            println!("Selected db_path: {:?}", path); // Log the path
+                            if let Some(parent) = path.parent() {
+                                println!("Creating directory: {:?}", parent);
+                                if let Err(e) = fs::create_dir_all(parent).await {
+                                    println!("Failed to create directory: {}", e);
+                                    slint
+                                        ::invoke_from_event_loop(move || {
                                             if let Some(ui) = ui_weak_inner.upgrade() {
-                                                ui.set_message(format!("Falha ao salvar config: {}", e).into());
+                                                ui.set_message(
+                                                    format!("Falha ao criar diretório: {}", e).into()
+                                                );
                                             }
-                                        }).ok();
-                                        return;
-                                    }
+                                        })
+                                        .ok();
+                                    return;
                                 }
-                                slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = ui_weak_inner.upgrade() {
-                                        ui.set_message("Registro bem sucedido!".into());
-                                        ui.set_username("".into());
-                                        ui.set_password("".into());
-                                    }
-                                }).ok();
+                                println!("Directory created successfully: {:?}", parent);
                             }
-                            Err(e) => {
-                                println!("Failed to load config: {}", e);
-                                slint::invoke_from_event_loop(move || {
+                            path
+                        }
+                        None => {
+                            println!("Save file dialog canceled");
+                            slint
+                                ::invoke_from_event_loop(move || {
                                     if let Some(ui) = ui_weak_inner.upgrade() {
-                                        ui.set_message(format!("Falha ao carregar config: {}", e).into());
+                                        ui.set_message("Registro cancelado".into());
                                     }
-                                }).ok();
+                                })
+                                .ok();
+                            return;
+                        }
+                    };
+
+                    println!("Attempting to register user with db_path: {:?}", db_path);
+                    let db_name = db_path.file_stem().unwrap().to_str().unwrap().to_string();
+                    match register_user(&db_path, username, password).await {
+                        Ok(_pool) => {
+                            match load_config().await {
+                                Ok(mut config) => {
+                                    if !config.databases.iter().any(|db| db.db_path == db_path) {
+                                        config.databases.push(DatabaseConfig {
+                                            name: db_name,
+                                            db_path: db_path.clone(),
+                                            masterkey_path: db_path.with_extension("masterkey"),
+                                        });
+                                        if let Err(e) = save_config(&config).await {
+                                            println!("Failed to save config: {}", e);
+                                            slint
+                                                ::invoke_from_event_loop(move || {
+                                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                                        ui.set_message(
+                                                            format!("Falha ao salvar config: {}", e).into()
+                                                        );
+                                                    }
+                                                })
+                                                .ok();
+                                            return;
+                                        }
+                                    }
+                                    slint
+                                        ::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                                ui.set_message("Registro bem sucedido!".into());
+                                                ui.set_username("".into());
+                                                ui.set_password("".into());
+                                            }
+                                        })
+                                        .ok();
+                                }
+                                Err(e) => {
+                                    println!("Failed to load config: {}", e);
+                                    slint
+                                        ::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                                ui.set_message(
+                                                    format!("Falha ao carregar config: {}", e).into()
+                                                );
+                                            }
+                                        })
+                                        .ok();
+                                }
                             }
                         }
+                        Err(e) => {
+                            println!("Registration failed: {}", e);
+                            let error_message = e.to_string();
+                            slint
+                                ::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                        ui.set_message(
+                                            format!("Falha no registro: {}", error_message).into()
+                                        );
+                                    }
+                                })
+                                .ok();
+                        }
                     }
-                    Err(e) => {
-                        println!("Registration failed: {}", e);
-                        let error_message = e.to_string();
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak_inner.upgrade() {
-                                ui.set_message(format!("Falha no registro: {}", error_message).into());
-                            }
-                        }).ok();
-                    }
-                }
-            }) {
+                })
+            {
                 Ok(_) => (),
                 Err(e) => {
                     println!("Failed to spawn local task: {}", e);
@@ -662,77 +764,109 @@ async fn setup_register_handler(ui: Arc<LoginWindow>) {
     });
 }
 
-
 async fn setup_import_handler(ui: Arc<LoginWindow>, black_square_window: Arc<BlackSquareWindow>) {
     let ui_weak = ui.as_weak();
     let black_weak = black_square_window.as_weak();
-    
+
     ui.on_importeddb({
         let ui_weak = ui_weak.clone();
         let black_weak = black_weak.clone();
         move || {
             let ui_weak = ui_weak.clone();
             let black_weak = black_weak.clone();
-            slint::spawn_local(async move {
-                let db_file = match AsyncFileDialog::new()
-                    .set_title("Select database file to import:")
-                    .add_filter("Database", &["db"])
-                    .pick_file()
-                    .await {
+            slint
+                ::spawn_local(async move {
+                    let db_file = match
+                        AsyncFileDialog::new()
+                            .set_title("Select database file to import:")
+                            .add_filter("Database", &["db"])
+                            .pick_file().await
+                    {
                         Some(handle) => handle.path().to_path_buf(),
                         None => {
                             slint::invoke_from_event_loop(move || {
-                                ui_weak.upgrade().map(|ui| ui.set_message("Database selection canceled".into()));
+                                ui_weak
+                                    .upgrade()
+                                    .map(|ui| ui.set_message("Database selection canceled".into()));
                             })?;
                             return Ok::<(), anyhow::Error>(());
                         }
                     };
-                let masterkey_file = match AsyncFileDialog::new()
-                    .set_title("Select Masterkey File")
-                    .add_filter("Masterkey File", &["masterkey"])
-                    .pick_file()
-                    .await {
+                    let masterkey_file = match
+                        AsyncFileDialog::new()
+                            .set_title("Select Masterkey File")
+                            .add_filter("Masterkey File", &["masterkey"])
+                            .pick_file().await
+                    {
                         Some(handle) => handle.path().to_path_buf(),
                         None => {
                             slint::invoke_from_event_loop(move || {
-                                ui_weak.upgrade().map(|ui| ui.set_message("Masterkey selection canceled.".into()));
+                                ui_weak
+                                    .upgrade()
+                                    .map(|ui|
+                                        ui.set_message("Masterkey selection canceled.".into())
+                                    );
                             })?;
                             return Ok(());
                         }
                     };
 
-                match import_database(&db_file, &masterkey_file, Some(&ui_weak.upgrade().unwrap().get_username().to_string())).await {
-                    Ok((user_id, pool)) => {
-                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                        let passwords = read_stored_passwords(&pool, user_id, key).await?;
-                        
-                        slint::invoke_from_event_loop({
-                            let ui_weak = ui_weak.clone();
-                            let black_weak = black_weak.clone();
-                            move || {
-                                if let Some(window) = black_weak.upgrade() {
-                                    window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
-                                    window.show().unwrap();
-                                    setup_password_handlers(&window, &pool, user_id, db_file.clone(), masterkey_file.clone());
+                    match
+                        import_database(
+                            &db_file,
+                            &masterkey_file,
+                            Some(&ui_weak.upgrade().unwrap().get_username().to_string())
+                        ).await
+                    {
+                        Ok((user_id, pool)) => {
+                            let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                            let passwords = read_stored_passwords(&pool, user_id, key).await?;
+
+                            slint::invoke_from_event_loop({
+                                let ui_weak = ui_weak.clone();
+                                let black_weak = black_weak.clone();
+                                move || {
+                                    if let Some(window) = black_weak.upgrade() {
+                                        window.set_password_entries(
+                                            ModelRc::new(VecModel::from(passwords))
+                                        );
+                                        window.show().unwrap();
+                                        setup_password_handlers(
+                                            &window,
+                                            &pool,
+                                            user_id,
+                                            db_file.clone(),
+                                            masterkey_file.clone()
+                                        );
+                                    }
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        ui.set_message("Database imported successfully!".into());
+                                        ui.hide().unwrap();
+                                    }
                                 }
-                                if let Some(ui) = ui_weak.upgrade() {
-                                    ui.set_message("Database imported successfully!".into());
-                                    ui.hide().unwrap();
-                                }
-                            }
-                        })?;
+                            })?;
+                        }
+                        Err(e) =>
+                            slint::invoke_from_event_loop(move || {
+                                ui_weak
+                                    .upgrade()
+                                    .map(|ui|
+                                        ui.set_message(format!("Import failed: {}", e).into())
+                                    );
+                            })?,
                     }
-                    Err(e) => slint::invoke_from_event_loop(move || {
-                        ui_weak.upgrade().map(|ui| ui.set_message(format!("Import failed: {}", e).into()));
-                    })?,
-                }
-                Ok(())
-            }).unwrap();
+                    Ok(())
+                })
+                .unwrap();
         }
     });
 }
 
-fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBuf, masterkey_path: PathBuf) {
+fn setup_export_handler(
+    black_square_window: &BlackSquareWindow,
+    db_path: PathBuf,
+    masterkey_path: PathBuf
+) {
     let black_weak = black_square_window.as_weak();
     black_square_window.on_export({
         let db_path = db_path.clone();
@@ -741,48 +875,88 @@ fn setup_export_handler(black_square_window: &BlackSquareWindow, db_path: PathBu
             let black_weak = black_weak.clone();
             let db_path = db_path.clone();
             let masterkey_path = masterkey_path.clone();
-            slint::spawn_local(async move {
-                let db_file = match AsyncFileDialog::new()
-                    .set_file_name("exportada.db")
-                    .save_file()
-                    .await
-                {
-                    Some(handle) => handle.path().to_path_buf(),
-                    None => {
-                        slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message("Exportação da database cancelada.".into()));
-                        }).unwrap();
+            slint
+                ::spawn_local(async move {
+                    let db_file = match
+                        AsyncFileDialog::new().set_file_name("exportada.db").save_file().await
+                    {
+                        Some(handle) => handle.path().to_path_buf(),
+                        None => {
+                            slint
+                                ::invoke_from_event_loop(move || {
+                                    black_weak
+                                        .upgrade()
+                                        .map(|w|
+                                            w.set_message(
+                                                "Exportação da database cancelada.".into()
+                                            )
+                                        );
+                                })
+                                .unwrap();
+                            return;
+                        }
+                    };
+                    if let Err(e) = tokio::fs::copy(&db_path, &db_file).await {
+                        slint
+                            ::invoke_from_event_loop(move || {
+                                black_weak
+                                    .upgrade()
+                                    .map(|w|
+                                        w.set_message(
+                                            format!("Exportação da database falhou. {}", e).into()
+                                        )
+                                    );
+                            })
+                            .unwrap();
                         return;
                     }
-                };
-                if let Err(e) = tokio::fs::copy(&db_path, &db_file).await {
-                    slint::invoke_from_event_loop(move || {
-                        black_weak.upgrade().map(|w| w.set_message(format!("Exportação da database falhou. {}", e).into()));
-                    }).unwrap();
-                    return;
-                }
-                let masterkey_file = match AsyncFileDialog::new()
-                    .set_file_name("exportada.masterkey")
-                    .save_file()
-                    .await
-                {
-                    Some(handle) => handle.path().to_path_buf(),
-                    None => {
-                        slint::invoke_from_event_loop(move || {
-                            black_weak.upgrade().map(|w| w.set_message("Exportação da masterkey cancelada".into()));
-                        }).unwrap();
-                        return;
-                    }
-                };
-                match tokio::fs::copy(&masterkey_path, &masterkey_file).await {
-                    Ok(_) => slint::invoke_from_event_loop(move || {
-                        black_weak.upgrade().map(|w| w.set_message("Database e masterkey exportadas com sucesso!".into()));
-                    }),
-                    Err(e) => slint::invoke_from_event_loop(move || {
-                        black_weak.upgrade().map(|w| w.set_message(format!("Exportação da masterkey falhou: {}", e).into()));
-                    }),
-                }.unwrap();
-            }).unwrap();
+                    let masterkey_file = match
+                        AsyncFileDialog::new()
+                            .set_file_name("exportada.masterkey")
+                            .save_file().await
+                    {
+                        Some(handle) => handle.path().to_path_buf(),
+                        None => {
+                            slint
+                                ::invoke_from_event_loop(move || {
+                                    black_weak
+                                        .upgrade()
+                                        .map(|w|
+                                            w.set_message(
+                                                "Exportação da masterkey cancelada".into()
+                                            )
+                                        );
+                                })
+                                .unwrap();
+                            return;
+                        }
+                    };
+                    (
+                        match tokio::fs::copy(&masterkey_path, &masterkey_file).await {
+                            Ok(_) =>
+                                slint::invoke_from_event_loop(move || {
+                                    black_weak
+                                        .upgrade()
+                                        .map(|w|
+                                            w.set_message(
+                                                "Database e masterkey exportadas com sucesso!".into()
+                                            )
+                                        );
+                                }),
+                            Err(e) =>
+                                slint::invoke_from_event_loop(move || {
+                                    black_weak
+                                        .upgrade()
+                                        .map(|w|
+                                            w.set_message(
+                                                format!("Exportação da masterkey falhou: {}", e).into()
+                                            )
+                                        );
+                                }),
+                        }
+                    ).unwrap();
+                })
+                .unwrap();
         }
     });
 }
@@ -793,7 +967,9 @@ async fn start_websocket_server(pool: Pool<Sqlite>, ui_sender: Sender<UiUpdate>,
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     *WEBSOCKET_SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
 
-    'websocket_loop: while let Ok((stream, _)) = tokio::select! {
+    'websocket_loop: while
+        let Ok((stream, _)) =
+            (tokio::select! {
         result = listener.accept() => result,
         _ = shutdown_rx.changed() => {
             if *shutdown_rx.borrow() {
@@ -803,7 +979,8 @@ async fn start_websocket_server(pool: Pool<Sqlite>, ui_sender: Sender<UiUpdate>,
             println!("websocket recebeu pedido de desligar mas não terminou");
             continue 'websocket_loop;
         }
-    } {
+    })
+    {
         let pool_clone = pool.clone();
         let ui_sender_clone = ui_sender.clone();
         tokio::spawn(async move {
@@ -811,8 +988,17 @@ async fn start_websocket_server(pool: Pool<Sqlite>, ui_sender: Sender<UiUpdate>,
                 let (mut write, mut read) = ws_stream.split();
                 while let Some(msg) = read.next().await {
                     if let Ok(Message::Text(text)) = msg {
-                        let response = process_websocket_message(&pool_clone, &text, &ui_sender_clone, user_id).await;
-                        let json_response = serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\":\"Erro de formatação: {}\"}}", e));
+                        let response = process_websocket_message(
+                            &pool_clone,
+                            &text,
+                            &ui_sender_clone,
+                            user_id
+                        ).await;
+                        let json_response = serde_json
+                            ::to_string(&response)
+                            .unwrap_or_else(|e|
+                                format!("{{\"error\":\"Erro de formatação: {}\"}}", e)
+                            );
                         if write.send(Message::Text(json_response.into())).await.is_err() {
                             println!("Falha na mensagem do websocket, a terminar ligação...");
                             break;
@@ -825,26 +1011,31 @@ async fn start_websocket_server(pool: Pool<Sqlite>, ui_sender: Sender<UiUpdate>,
     println!("Websocket desligou.");
 }
 
-async fn save_website_preference(pool: &Pool<Sqlite>, user_id: i32, website: &str, save_password: bool) -> Result<()> {
-    sqlx::query(
-        "INSERT OR REPLACE INTO WebsitePreferences (user_id, website, save_password) VALUES (?, ?, ?)"
-    )
-    .bind(user_id)
-    .bind(website)
-    .bind(save_password as i32)
-    .execute(pool)
-    .await?;
+async fn save_website_preference(
+    pool: &Pool<Sqlite>,
+    user_id: i32,
+    website: &str,
+    save_password: bool
+) -> Result<()> {
+    sqlx
+        ::query(
+            "INSERT OR REPLACE INTO WebsitePreferences (user_id, website, save_password) VALUES (?, ?, ?)"
+        )
+        .bind(user_id)
+        .bind(website)
+        .bind(save_password as i32)
+        .execute(pool).await?;
     Ok(())
 }
 
 async fn get_website_preference(pool: &Pool<Sqlite>, user_id: i32, website: &str) -> Result<bool> {
-    let save_password: Option<i32> = sqlx::query_scalar(
-        "SELECT save_password FROM WebsitePreferences WHERE user_id = ? AND website = ?"
-    )
-    .bind(user_id)
-    .bind(website)
-    .fetch_optional(pool)
-    .await?;
+    let save_password: Option<i32> = sqlx
+        ::query_scalar(
+            "SELECT save_password FROM WebsitePreferences WHERE user_id = ? AND website = ?"
+        )
+        .bind(user_id)
+        .bind(website)
+        .fetch_optional(pool).await?;
     Ok(save_password.unwrap_or(1) != 0)
 }
 
@@ -852,7 +1043,7 @@ async fn process_websocket_message(
     pool: &Pool<Sqlite>,
     text: &str,
     ui_sender: &Sender<UiUpdate>,
-    user_id: i32,
+    user_id: i32
 ) -> WebSocketResponse {
     println!("WebSocket recebeu: {}", text);
     match text {
@@ -860,22 +1051,28 @@ async fn process_websocket_message(
             let parts: Vec<&str> = t[5..].split("|").collect();
             if parts.len() == 3 {
                 match save_field_preference(pool, parts[0], parts[1], parts[2]).await {
-                    Ok(_) => WebSocketResponse {
-                        password: None,
-                        username_email: None,
-                        preferences: Vec::new(),
-                        save_allowed: Some(get_website_preference(pool, user_id, parts[0]).await.unwrap_or(true)),
-                        error: None,
-                        multiple_accounts: None,
-                    },
-                    Err(e) => WebSocketResponse {
-                        password: None,
-                        username_email: None,
-                        preferences: Vec::new(),
-                        save_allowed: None,
-                        error: Some(e.to_string()),
-                        multiple_accounts: None,
-                    },
+                    Ok(_) =>
+                        WebSocketResponse {
+                            password: None,
+                            username_email: None,
+                            preferences: Vec::new(),
+                            save_allowed: Some(
+                                get_website_preference(pool, user_id, parts[0]).await.unwrap_or(
+                                    true
+                                )
+                            ),
+                            error: None,
+                            multiple_accounts: None,
+                        },
+                    Err(e) =>
+                        WebSocketResponse {
+                            password: None,
+                            username_email: None,
+                            preferences: Vec::new(),
+                            save_allowed: None,
+                            error: Some(e.to_string()),
+                            multiple_accounts: None,
+                        },
                 }
             } else {
                 WebSocketResponse {
@@ -902,7 +1099,11 @@ async fn process_websocket_message(
                                 selector,
                                 role: role.to_string(),
                             }],
-                            save_allowed: Some(get_website_preference(pool, user_id, hostname).await.unwrap_or(true)),
+                            save_allowed: Some(
+                                get_website_preference(pool, user_id, hostname).await.unwrap_or(
+                                    true
+                                )
+                            ),
                             error: None,
                             multiple_accounts: None,
                         };
@@ -912,15 +1113,16 @@ async fn process_websocket_message(
                             response.username_email = value;
                         }
                         response
-                    },
-                    Err(e) => WebSocketResponse {
-                        password: None,
-                        username_email: None,
-                        preferences: Vec::new(),
-                        save_allowed: None,
-                        error: Some(e.to_string()),
-                        multiple_accounts: None,
-                    },
+                    }
+                    Err(e) =>
+                        WebSocketResponse {
+                            password: None,
+                            username_email: None,
+                            preferences: Vec::new(),
+                            save_allowed: None,
+                            error: Some(e.to_string()),
+                            multiple_accounts: None,
+                        },
                 }
             } else {
                 WebSocketResponse {
@@ -939,22 +1141,24 @@ async fn process_websocket_message(
                 let website = parts[0];
                 let save_password = parts[1] == "1";
                 match save_website_preference(pool, user_id, website, save_password).await {
-                    Ok(_) => WebSocketResponse {
-                        password: None,
-                        username_email: None,
-                        preferences: Vec::new(),
-                        save_allowed: Some(save_password),
-                        error: None,
-                        multiple_accounts: None,
-                    },
-                    Err(e) => WebSocketResponse {
-                        password: None,
-                        username_email: None,
-                        preferences: Vec::new(),
-                        save_allowed: None,
-                        error: Some(e.to_string()),
-                        multiple_accounts: None,
-                    },
+                    Ok(_) =>
+                        WebSocketResponse {
+                            password: None,
+                            username_email: None,
+                            preferences: Vec::new(),
+                            save_allowed: Some(save_password),
+                            error: None,
+                            multiple_accounts: None,
+                        },
+                    Err(e) =>
+                        WebSocketResponse {
+                            password: None,
+                            username_email: None,
+                            preferences: Vec::new(),
+                            save_allowed: None,
+                            error: Some(e.to_string()),
+                            multiple_accounts: None,
+                        },
                 }
             } else {
                 WebSocketResponse {
@@ -974,7 +1178,9 @@ async fn process_websocket_message(
                 let website = parts[0];
                 println!("Processing ADD_PASSWORD for website: {}", website);
                 if !get_website_preference(pool, user_id, website).await.unwrap_or(true) {
-                    let _ = ui_sender.send(UiUpdate::Error("Guardar passwords desligado para este website".to_string())).await;
+                    let _ = ui_sender.send(
+                        UiUpdate::Error("Guardar passwords desligado para este website".to_string())
+                    ).await;
                     return WebSocketResponse {
                         password: None,
                         username_email: None,
@@ -984,19 +1190,30 @@ async fn process_websocket_message(
                         multiple_accounts: None,
                     };
                 }
-                match add_password_with_selectors(pool, user_id, website, parts[1], parts[2], parts[3], parts[4]).await {
+                match
+                    add_password_with_selectors(
+                        pool,
+                        user_id,
+                        website,
+                        parts[1],
+                        parts[2],
+                        parts[3],
+                        parts[4]
+                    ).await
+                {
                     Ok(()) => {
                         println!("Password recebida com sucesso, a atualizar ui");
                         let pool_clone = pool.clone();
                         let ui_sender_clone = ui_sender.clone();
                         tokio::spawn(async move {
                             let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                            let passwords = read_stored_passwords(&pool_clone, user_id, key)
-                                .await
-                                .unwrap_or_default();
+                            let passwords = read_stored_passwords(
+                                &pool_clone,
+                                user_id,
+                                key
+                            ).await.unwrap_or_default();
                             let _ = ui_sender_clone
-                                .send(UiUpdate::AddPasswordSuccess(passwords))
-                                .await
+                                .send(UiUpdate::AddPasswordSuccess(passwords)).await
                                 .map_err(|e| println!("Falha na atualização da ui {}", e));
                         });
                         WebSocketResponse {
@@ -1010,13 +1227,13 @@ async fn process_websocket_message(
                                 FieldPreference {
                                     selector: parts[4].to_string(),
                                     role: "Password".to_string(),
-                                },
+                                }
                             ],
                             save_allowed: Some(true),
                             error: None,
                             multiple_accounts: None,
                         }
-                    },
+                    }
                     Err(e) => {
                         let error_message = e.to_string();
                         println!("Falha em adicionar password: {}", error_message);
@@ -1055,7 +1272,9 @@ async fn process_websocket_message(
                             password: None,
                             username_email: None,
                             preferences: Vec::new(),
-                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
+                            save_allowed: Some(
+                                get_website_preference(pool, user_id, website).await.unwrap_or(true)
+                            ),
                             error: None,
                             multiple_accounts: None,
                         };
@@ -1067,7 +1286,9 @@ async fn process_websocket_message(
                             password: password_opt.clone(),
                             username_email: username_opt.clone(),
                             preferences: prefs,
-                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
+                            save_allowed: Some(
+                                get_website_preference(pool, user_id, website).await.unwrap_or(true)
+                            ),
                             error: None,
                             multiple_accounts: None,
                         }
@@ -1076,7 +1297,9 @@ async fn process_websocket_message(
                             password: None,
                             username_email: None,
                             preferences: prefs,
-                            save_allowed: Some(get_website_preference(pool, user_id, website).await.unwrap_or(true)),
+                            save_allowed: Some(
+                                get_website_preference(pool, user_id, website).await.unwrap_or(true)
+                            ),
                             error: None,
                             multiple_accounts: Some(
                                 credentials
@@ -1105,27 +1328,27 @@ async fn process_websocket_message(
     }
 }
 
-
-async fn retrieve_field_data(pool: &Pool<Sqlite>, user_id: i32, website: &str, role: &str) -> Result<(Option<String>, String)> {
-    let selector: String = sqlx::query_scalar(
-        "SELECT selector FROM FieldPreferences WHERE website = ? AND role = ?"
-    )
-    .bind(website)
-    .bind(role)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| anyhow!("No selector found for role {} on website {}", role, website))?;
+async fn retrieve_field_data(
+    pool: &Pool<Sqlite>,
+    user_id: i32,
+    website: &str,
+    role: &str
+) -> Result<(Option<String>, String)> {
+    let selector: String = sqlx
+        ::query_scalar("SELECT selector FROM FieldPreferences WHERE website = ? AND role = ?")
+        .bind(website)
+        .bind(role)
+        .fetch_optional(pool).await?
+        .ok_or_else(|| anyhow!("No selector found for role {} on website {}", role, website))?;
 
     let value: Option<String> = if role == "password" {
         retrieve_password(pool, user_id, website).await?
     } else {
-        sqlx::query_scalar(
-            "SELECT username_email FROM Passwords WHERE user_id = ? AND website = ?"
-        )
-        .bind(user_id)
-        .bind(website)
-        .fetch_optional(pool)
-        .await?
+        sqlx
+            ::query_scalar("SELECT username_email FROM Passwords WHERE user_id = ? AND website = ?")
+            .bind(user_id)
+            .bind(website)
+            .fetch_optional(pool).await?
     };
     Ok((value, selector))
 }
@@ -1133,16 +1356,19 @@ async fn retrieve_field_data(pool: &Pool<Sqlite>, user_id: i32, website: &str, r
 async fn retrieve_password_and_prefs(
     pool: &Pool<Sqlite>,
     user_id: i32,
-    website: &str,
+    website: &str
 ) -> Result<Vec<(Option<String>, Option<String>, Vec<FieldPreference>)>> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
-    let rows = sqlx::query_as::<_, (String, Vec<u8>)>(
-        "SELECT username_email, password FROM Passwords WHERE user_id = ? AND website = ?"
-    )
-    .bind(user_id)
-    .bind(website)
-    .fetch_all(pool)
-    .await?;
+    let key = ENCRYPTION_KEY.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let rows = sqlx
+        ::query_as::<_, (String, Vec<u8>)>(
+            "SELECT username_email, password FROM Passwords WHERE user_id = ? AND website = ?"
+        )
+        .bind(user_id)
+        .bind(website)
+        .fetch_all(pool).await?;
 
     let mut credentials = Vec::new();
     for (username_email, encrypted_password) in rows {
@@ -1155,42 +1381,56 @@ async fn retrieve_password_and_prefs(
     Ok(credentials)
 }
 
-async fn save_field_preference(pool: &Pool<Sqlite>, website: &str, selector: &str, role: &str) -> Result<()> {
+async fn save_field_preference(
+    pool: &Pool<Sqlite>,
+    website: &str,
+    selector: &str,
+    role: &str
+) -> Result<()> {
     if role != "Username" && role != "Password" {
         return Err(anyhow!("Invalid role: {}", role));
     }
-    sqlx::query(
-        "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)"
-    )
-    .bind(website)
-    .bind(selector)
-    .bind(role)
-    .execute(pool)
-    .await?;
+    sqlx
+        ::query(
+            "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)"
+        )
+        .bind(website)
+        .bind(selector)
+        .bind(role)
+        .execute(pool).await?;
     println!("Saved preference: website={}, selector={}, role={}", website, selector, role);
     Ok(())
 }
 
 async fn get_field_preferences(pool: &Pool<Sqlite>, website: &str) -> Result<Vec<FieldPreference>> {
-    let rows = sqlx::query_as::<_, FieldPreference>(
-        "SELECT selector, role FROM FieldPreferences WHERE website = ?"
-    )
-    .bind(website)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx
+        ::query_as::<_, FieldPreference>(
+            "SELECT selector, role FROM FieldPreferences WHERE website = ?"
+        )
+        .bind(website)
+        .fetch_all(pool).await?;
     Ok(rows)
 }
 
-async fn retrieve_password(pool: &Pool<Sqlite>, user_id: i32, website: &str) -> Result<Option<String>> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
-    let encrypted_password: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT password FROM Passwords WHERE user_id = ? AND website = ?"
+async fn retrieve_password(
+    pool: &Pool<Sqlite>,
+    user_id: i32,
+    website: &str
+) -> Result<Option<String>> {
+    let key = ENCRYPTION_KEY.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Encryption key not set"))?;
+    let encrypted_password: Option<Vec<u8>> = sqlx
+        ::query_scalar("SELECT password FROM Passwords WHERE user_id = ? AND website = ?")
+        .bind(user_id)
+        .bind(website)
+        .fetch_optional(pool).await?;
+    Ok(
+        encrypted_password.map(|ep|
+            decrypt_password(&ep, &key).unwrap_or("Decryption failed".to_string())
+        )
     )
-    .bind(user_id)
-    .bind(website)
-    .fetch_optional(pool)
-    .await?;
-    Ok(encrypted_password.map(|ep| decrypt_password(&ep, &key).unwrap_or("Decryption failed".to_string())))
 }
 
 async fn add_password_with_selectors(
@@ -1200,67 +1440,87 @@ async fn add_password_with_selectors(
     username_email: &str,
     password: &str,
     username_selector: &str,
-    password_selector: &str,
+    password_selector: &str
 ) -> Result<()> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Chave de encriptção não definida={}", user_id))?;
+    let key = ENCRYPTION_KEY.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Chave de encriptção não definida={}", user_id))?;
     let encrypted_password = encrypt(password.as_bytes(), &key)?;
 
     let mut tx = pool.begin().await?;
-    let existing_id: Option<i32> = sqlx::query_scalar(
-        "SELECT id FROM Passwords WHERE user_id = ? AND website = ? AND username_email = ?"
-    )
-    .bind(user_id)
-    .bind(website)
-    .bind(username_email)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing_id: Option<i32> = sqlx
+        ::query_scalar(
+            "SELECT id FROM Passwords WHERE user_id = ? AND website = ? AND username_email = ?"
+        )
+        .bind(user_id)
+        .bind(website)
+        .bind(username_email)
+        .fetch_optional(&mut *tx).await?;
 
     if let Some(id) = existing_id {
-        sqlx::query("UPDATE Passwords SET password = ? WHERE id = ?")
+        sqlx
+            ::query("UPDATE Passwords SET password = ? WHERE id = ?")
             .bind(&encrypted_password)
             .bind(id)
-            .execute(&mut *tx)
-            .await?;
+            .execute(&mut *tx).await?;
     } else {
-        sqlx::query("INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)")
+        sqlx
+            ::query(
+                "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)"
+            )
             .bind(user_id)
             .bind(website)
             .bind(username_email)
             .bind(&encrypted_password)
-            .execute(&mut *tx)
-            .await?;
+            .execute(&mut *tx).await?;
     }
 
-    for (selector, role) in [(username_selector, "Username"), (password_selector, "Password")] {
-        sqlx::query("INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)")
+    for (selector, role) in [
+        (username_selector, "Username"),
+        (password_selector, "Password"),
+    ] {
+        sqlx
+            ::query(
+                "INSERT OR REPLACE INTO FieldPreferences (website, selector, role) VALUES (?, ?, ?)"
+            )
             .bind(website)
             .bind(selector)
             .bind(role)
-            .execute(&mut *tx)
-            .await?;
+            .execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
     Ok(())
 }
 
-fn spawn_ui_update_handler(weak_window: Weak<BlackSquareWindow>, mut ui_receiver: Receiver<UiUpdate>) {
+fn spawn_ui_update_handler(
+    weak_window: Weak<BlackSquareWindow>,
+    mut ui_receiver: Receiver<UiUpdate>
+) {
     tokio::spawn(async move {
         while let Some(update) = ui_receiver.recv().await {
-            slint::invoke_from_event_loop({
-                let weak_window = weak_window.clone();
-                move || {
-                    if let Some(window) = weak_window.upgrade() {
-                        match update {
-                            UiUpdate::AddPasswordSuccess(passwords) => {
-                                window.set_message("✅ Password adicionada com sucesso!".into());
-                                window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+            slint
+                ::invoke_from_event_loop({
+                    let weak_window = weak_window.clone();
+                    move || {
+                        if let Some(window) = weak_window.upgrade() {
+                            match update {
+                                UiUpdate::AddPasswordSuccess(passwords) => {
+                                    window.set_message(
+                                        "✅ Password adicionada com sucesso!".into()
+                                    );
+                                    window.set_password_entries(
+                                        ModelRc::new(VecModel::from(passwords))
+                                    );
+                                }
+                                UiUpdate::Error(msg) =>
+                                    window.set_message(format!("❌ {}", msg).into()),
                             }
-                            UiUpdate::Error(msg) => window.set_message(format!("❌ {}", msg).into()),
                         }
                     }
-                }
-            }).expect("Failed to invoke from event loop");
+                })
+                .expect("Failed to invoke from event loop");
         }
     });
 }
@@ -1270,7 +1530,7 @@ fn setup_password_handlers(
     pool: &Pool<Sqlite>,
     user_id: i32,
     db_path: PathBuf,
-    masterkey_path: PathBuf,
+    masterkey_path: PathBuf
 ) {
     let black_weak = black_square_window.as_weak();
     let pool = pool.clone();
@@ -1290,65 +1550,94 @@ fn setup_password_handlers(
                 return;
             }
 
-            slint::spawn_local({
-                let black_weak = black_weak.clone();
-                let pool = pool.clone();
-                async move {
-                    let result = if window.get_isAddMode() {
-                        add_password(&pool, user_id, &website, &username_email, &password).await
-                    } else {
-                        update_password(&pool, window.get_id(), user_id, &website, &username_email, &password).await
-                    };
-                    let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(window) = black_weak.upgrade() {
-                            match result {
-                                Ok(_) => {
-                                    window.set_message(if window.get_isAddMode() { "Password adicionada com sucesso!" } else { "Password atualizada com sucesso!" }.into());
-                                    window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+            slint
+                ::spawn_local({
+                    let black_weak = black_weak.clone();
+                    let pool = pool.clone();
+                    async move {
+                        let result = if window.get_isAddMode() {
+                            add_password(&pool, user_id, &website, &username_email, &password).await
+                        } else {
+                            update_password(
+                                &pool,
+                                window.get_id(),
+                                user_id,
+                                &website,
+                                &username_email,
+                                &password
+                            ).await
+                        };
+                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                        let passwords = read_stored_passwords(
+                            &pool,
+                            user_id,
+                            key
+                        ).await.unwrap_or_default();
+                        slint
+                            ::invoke_from_event_loop(move || {
+                                if let Some(window) = black_weak.upgrade() {
+                                    match result {
+                                        Ok(_) => {
+                                            window.set_message(
+                                                (
+                                                    if window.get_isAddMode() {
+                                                        "Password adicionada com sucesso!"
+                                                    } else {
+                                                        "Password atualizada com sucesso!"
+                                                    }
+                                                ).into()
+                                            );
+                                            window.set_password_entries(
+                                                ModelRc::new(VecModel::from(passwords))
+                                            );
+                                        }
+                                        Err(e) =>
+                                            window.set_message(format!("Error: {}", e).into()),
+                                    }
                                 }
-                                Err(e) => window.set_message(format!("Error: {}", e).into()),
-                            }
-                        }
-                    }).unwrap();
-                }
-            }).unwrap();
+                            })
+                            .unwrap();
+                    }
+                })
+                .unwrap();
         }
     });
 
     black_square_window.on_websocket({
-    let black_weak = black_weak.clone();
-    let pool = pool.clone();
-    move |enabled| {
-        let window = black_weak.upgrade().unwrap();
-        if enabled {
-            let (ui_sender, ui_receiver) = channel::<UiUpdate>(100);
-            let handle = tokio::spawn(start_websocket_server(pool.clone(), ui_sender, user_id));
-            *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
-            spawn_ui_update_handler(window.as_weak(), ui_receiver);
-            window.set_message("✅ Websocket Iniciado!".into());
-            window.set_websocket_enabled(true);
-        } else {
-            if let Some(shutdown_tx) = WEBSOCKET_SHUTDOWN.lock().unwrap().as_ref() {
-                let _ = shutdown_tx.send(true);
-                if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
-                    handle.abort();
-                    slint::spawn_local(async move {
-                        if handle.await.is_ok() {  // Error at line 769
-                            println!("WebSocket task completed after abort");
-                        }
-                    }).unwrap();
-                    window.set_message("✅ WebSocket foi parado.".into());
-                }
+        let black_weak = black_weak.clone();
+        let pool = pool.clone();
+        move |enabled| {
+            let window = black_weak.upgrade().unwrap();
+            if enabled {
+                let (ui_sender, ui_receiver) = channel::<UiUpdate>(100);
+                let handle = tokio::spawn(start_websocket_server(pool.clone(), ui_sender, user_id));
+                *WEBSOCKET_TASK.lock().unwrap() = Some(handle);
+                spawn_ui_update_handler(window.as_weak(), ui_receiver);
+                window.set_message("✅ Websocket Iniciado!".into());
+                window.set_websocket_enabled(true);
             } else {
-                window.set_message("❌ Sem websocket para parar.".into());
+                if let Some(shutdown_tx) = WEBSOCKET_SHUTDOWN.lock().unwrap().as_ref() {
+                    let _ = shutdown_tx.send(true);
+                    if let Some(handle) = WEBSOCKET_TASK.lock().unwrap().take() {
+                        handle.abort();
+                        slint
+                            ::spawn_local(async move {
+                                if handle.await.is_ok() {
+                                    // Error at line 769
+                                    println!("WebSocket task completed after abort");
+                                }
+                            })
+                            .unwrap();
+                        window.set_message("✅ WebSocket foi parado.".into());
+                    }
+                } else {
+                    window.set_message("❌ Sem websocket para parar.".into());
+                }
+                window.set_websocket_enabled(false);
+                *WEBSOCKET_SHUTDOWN.lock().unwrap() = None;
             }
-            window.set_websocket_enabled(false);
-            *WEBSOCKET_SHUTDOWN.lock().unwrap() = None;
         }
-    }
-});
+    });
 
     setup_export_handler(black_square_window, db_path.clone(), masterkey_path.clone());
 
@@ -1357,32 +1646,58 @@ fn setup_password_handlers(
         let pool = pool.clone();
         move |id, website, username_email, password| {
             let window = black_weak.upgrade().unwrap();
-            let (website, username_email, password) = (website.to_string(), username_email.to_string(), password.to_string());
+            let (website, username_email, password) = (
+                website.to_string(),
+                username_email.to_string(),
+                password.to_string(),
+            );
             if website.is_empty() || username_email.is_empty() || password.is_empty() {
                 window.set_message("Todos os campos precisam de ser preenchidos.".into());
                 return;
             }
 
-            slint::spawn_local({
-                let black_weak = black_weak.clone();
-                let pool = pool.clone();
-                async move {
-                    let result = update_password(&pool, id, user_id, &website, &username_email, &password).await;
-                    let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(window) = black_weak.upgrade() {
-                            match result {
-                                Ok(_) => {
-                                    window.set_message("✅ Password atualizada com sucesso!".into());
-                                    window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+            slint
+                ::spawn_local({
+                    let black_weak = black_weak.clone();
+                    let pool = pool.clone();
+                    async move {
+                        let result = update_password(
+                            &pool,
+                            id,
+                            user_id,
+                            &website,
+                            &username_email,
+                            &password
+                        ).await;
+                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                        let passwords = read_stored_passwords(
+                            &pool,
+                            user_id,
+                            key
+                        ).await.unwrap_or_default();
+                        slint
+                            ::invoke_from_event_loop(move || {
+                                if let Some(window) = black_weak.upgrade() {
+                                    match result {
+                                        Ok(_) => {
+                                            window.set_message(
+                                                "✅ Password atualizada com sucesso!".into()
+                                            );
+                                            window.set_password_entries(
+                                                ModelRc::new(VecModel::from(passwords))
+                                            );
+                                        }
+                                        Err(e) =>
+                                            window.set_message(
+                                                format!("❌ Erro ao atualizar a password: {}", e).into()
+                                            ),
+                                    }
                                 }
-                                Err(e) => window.set_message(format!("❌ Erro ao atualizar a password: {}", e).into()),
-                            }
-                        }
-                    }).unwrap();
-                }
-            }).unwrap();
+                            })
+                            .unwrap();
+                    }
+                })
+                .unwrap();
         }
     });
 
@@ -1390,26 +1705,39 @@ fn setup_password_handlers(
         let black_weak = black_weak.clone();
         let pool = pool.clone();
         move |id| {
-            slint::spawn_local({
-                let black_weak = black_weak.clone();
-                let pool = pool.clone();
-                async move {
-                    let result = delete_password(&pool, id, user_id).await;
-                    let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
-                    let passwords = read_stored_passwords(&pool, user_id, key).await.unwrap_or_default();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(window) = black_weak.upgrade() {
-                            match result {
-                                Ok(_) => {
-                                    window.set_message("✅ Password deleteda !".into());
-                                    window.set_password_entries(ModelRc::new(VecModel::from(passwords)));
+            slint
+                ::spawn_local({
+                    let black_weak = black_weak.clone();
+                    let pool = pool.clone();
+                    async move {
+                        let result = delete_password(&pool, id, user_id).await;
+                        let key = ENCRYPTION_KEY.lock().unwrap().clone().unwrap();
+                        let passwords = read_stored_passwords(
+                            &pool,
+                            user_id,
+                            key
+                        ).await.unwrap_or_default();
+                        slint
+                            ::invoke_from_event_loop(move || {
+                                if let Some(window) = black_weak.upgrade() {
+                                    match result {
+                                        Ok(_) => {
+                                            window.set_message("✅ Password deleteda !".into());
+                                            window.set_password_entries(
+                                                ModelRc::new(VecModel::from(passwords))
+                                            );
+                                        }
+                                        Err(e) =>
+                                            window.set_message(
+                                                format!("❌ Erro ao deletar password: {}", e).into()
+                                            ),
+                                    }
                                 }
-                                Err(e) => window.set_message(format!("❌ Erro ao deletar password: {}", e).into()),
-                            }
-                        }
-                    }).unwrap();
-                }
-            }).unwrap();
+                            })
+                            .unwrap();
+                    }
+                })
+                .unwrap();
         }
     });
 
@@ -1418,52 +1746,68 @@ fn setup_password_handlers(
         move |enabled| {
             let app_name = "EZPass".to_string(); // Clone to move into async block
             let exe_path = std::env::current_exe().unwrap().to_str().unwrap().to_string(); // Clone to move into async block
-            
-            slint::spawn_local({
-                let window_weak = black_weak.clone();
-                async move {
-                    if enabled {
-                        match add_to_startup(&app_name, &exe_path).await {
-                            Err(e) => {
-                                if let Some(window) = window_weak.upgrade() {
-                                    window.set_message(format!("❌ Falha ao ativar autostart: {}", e).into());
+
+            slint
+                ::spawn_local({
+                    let window_weak = black_weak.clone();
+                    async move {
+                        if enabled {
+                            match add_to_startup(&app_name, &exe_path).await {
+                                Err(e) => {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.set_message(
+                                            format!("❌ Falha ao ativar autostart: {}", e).into()
+                                        );
+                                    }
+                                }
+                                Ok(()) => {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.set_message("✅ Autostart ativado".into());
+                                    }
                                 }
                             }
-                            Ok(()) => {
-                                if let Some(window) = window_weak.upgrade() {
-                                    window.set_message("✅ Autostart ativado".into());
+                        } else {
+                            match remove_from_startup(&app_name).await {
+                                Err(e) => {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.set_message(
+                                            format!("❌ Falha ao desativar autostart: {}", e).into()
+                                        );
+                                    }
                                 }
-                            }
-                        }
-                    } else {
-                        match remove_from_startup(&app_name).await {
-                            Err(e) => {
-                                if let Some(window) = window_weak.upgrade() {
-                                    window.set_message(format!("❌ Falha ao desativar autostart: {}", e).into());
-                                }
-                            }
-                            Ok(()) => {
-                                if let Some(window) = window_weak.upgrade() {
-                                    window.set_message("✅ Autostart desativado".into());
+                                Ok(()) => {
+                                    if let Some(window) = window_weak.upgrade() {
+                                        window.set_message("✅ Autostart desativado".into());
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }).unwrap(); // Spawn the async task
+                })
+                .unwrap(); // Spawn the async task
         }
     });
 }
 
 fn hash_password(password: &str, salt: &SaltString) -> Result<String> {
-    Ok(Argon2::default().hash_password(password.as_bytes(), salt).map_err(|e| anyhow!(e))?.to_string())
+    Ok(
+        Argon2::default()
+            .hash_password(password.as_bytes(), salt)
+            .map_err(|e| anyhow!(e))?
+            .to_string()
+    )
 }
 
 fn derive_key(password: &str, salt: &str) -> Result<Vec<u8>> {
     let salt = SaltString::from_b64(salt).map_err(|e| anyhow!("Invalid salt: {}", e))?;
     let argon2 = Argon2::default();
     let password_hash = argon2.hash_password(password.as_bytes(), &salt).map_err(|e| anyhow!(e))?;
-    Ok(password_hash.hash.ok_or_else(|| anyhow!("No hash output"))?.as_bytes().to_vec())
+    Ok(
+        password_hash.hash
+            .ok_or_else(|| anyhow!("No hash output"))?
+            .as_bytes()
+            .to_vec()
+    )
 }
 
 fn encrypt_password(plaintext: &str, key: &[u8]) -> Result<Vec<u8>> {
@@ -1475,35 +1819,54 @@ fn decrypt_password(encrypted_data: &[u8], key: &[u8]) -> Result<String> {
     String::from_utf8(plaintext).map_err(|e| anyhow!("Invalid UTF-8 in decrypted data: {}", e))
 }
 
-async fn add_password(pool: &Pool<Sqlite>, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+async fn add_password(
+    pool: &Pool<Sqlite>,
+    user_id: i32,
+    website: &str,
+    username_email: &str,
+    password: &str
+) -> Result<()> {
+    let key = ENCRYPTION_KEY.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Encryption key not set"))?;
     let encrypted_password = encrypt_password(password, &key)?;
-    sqlx::query(
-        "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)"
-    )
-    .bind(user_id)
-    .bind(website)
-    .bind(username_email)
-    .bind(&encrypted_password)
-    .execute(pool)
-    .await?;
+    sqlx
+        ::query(
+            "INSERT INTO Passwords (user_id, website, username_email, password) VALUES (?, ?, ?, ?)"
+        )
+        .bind(user_id)
+        .bind(website)
+        .bind(username_email)
+        .bind(&encrypted_password)
+        .execute(pool).await?;
     Ok(())
 }
 
-async fn update_password(pool: &Pool<Sqlite>, id: i32, user_id: i32, website: &str, username_email: &str, password: &str) -> Result<()> {
-    let key = ENCRYPTION_KEY.lock().unwrap().clone().ok_or_else(|| anyhow!("Encryption key not set"))?;
+async fn update_password(
+    pool: &Pool<Sqlite>,
+    id: i32,
+    user_id: i32,
+    website: &str,
+    username_email: &str,
+    password: &str
+) -> Result<()> {
+    let key = ENCRYPTION_KEY.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Encryption key not set"))?;
     let encrypted_password = encrypt_password(password, &key)?;
-    let rows_affected = sqlx::query(
-        "UPDATE Passwords SET website = ?, username_email = ?, password = ? WHERE id = ? AND user_id = ?"
-    )
-    .bind(website)
-    .bind(username_email)
-    .bind(&encrypted_password)
-    .bind(id)
-    .bind(user_id)
-    .execute(pool)
-    .await?
-    .rows_affected();
+    let rows_affected = sqlx
+        ::query(
+            "UPDATE Passwords SET website = ?, username_email = ?, password = ? WHERE id = ? AND user_id = ?"
+        )
+        .bind(website)
+        .bind(username_email)
+        .bind(&encrypted_password)
+        .bind(id)
+        .bind(user_id)
+        .execute(pool).await?
+        .rows_affected();
     if rows_affected == 0 {
         return Err(anyhow!("No matching record found to update"));
     }
@@ -1511,11 +1874,11 @@ async fn update_password(pool: &Pool<Sqlite>, id: i32, user_id: i32, website: &s
 }
 
 async fn delete_password(pool: &Pool<Sqlite>, id: i32, user_id: i32) -> Result<()> {
-    let rows_affected = sqlx::query("DELETE FROM Passwords WHERE id = ? AND user_id = ?")
+    let rows_affected = sqlx
+        ::query("DELETE FROM Passwords WHERE id = ? AND user_id = ?")
         .bind(id)
         .bind(user_id)
-        .execute(pool)
-        .await?
+        .execute(pool).await?
         .rows_affected();
     if rows_affected == 0 {
         return Err(anyhow!("No matching record found to delete"));
@@ -1528,7 +1891,10 @@ async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_SET_VALUE)?;
+    let run_key = hkcu.open_subkey_with_flags(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        KEY_SET_VALUE
+    )?;
     run_key.set_value(app_name, &app_path)?;
     Ok(())
 }
@@ -1538,7 +1904,10 @@ async fn remove_from_startup(app_name: &str) -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_SET_VALUE)?;
+    let run_key = hkcu.open_subkey_with_flags(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        KEY_SET_VALUE
+    )?;
     run_key.delete_value(app_name)?;
     Ok(())
 }
@@ -1562,9 +1931,13 @@ async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
          Hidden=false\n\
          NoDisplay=false\n\
          X-GNOME-Autostart-enabled=true",
-        app_name, app_path
+        app_name,
+        app_path
     );
-    let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
+    let autostart_dir = dirs
+        ::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("autostart");
     tokio::fs::create_dir_all(&autostart_dir).await?;
     tokio::fs::write(autostart_dir.join(format!("{}.desktop", app_name)), desktop_content).await?;
     Ok(())
@@ -1572,7 +1945,10 @@ async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 async fn remove_from_startup(app_name: &str) -> Result<()> {
-    let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
+    let autostart_dir = dirs
+        ::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("autostart");
     let path = autostart_dir.join(format!("{}.desktop", app_name));
     if path.exists() {
         tokio::fs::remove_file(path).await?;
@@ -1582,7 +1958,10 @@ async fn remove_from_startup(app_name: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 async fn is_in_startup(app_name: &str) -> Result<bool> {
-    let autostart_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("autostart");
+    let autostart_dir = dirs
+        ::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("autostart");
     Ok(autostart_dir.join(format!("{}.desktop", app_name)).exists())
 }
 
@@ -1603,17 +1982,26 @@ async fn add_to_startup(app_name: &str, app_path: &str) -> Result<()> {
              <true/>\n\
          </dict>\n\
          </plist>",
-        app_name, app_path
+        app_name,
+        app_path
     );
-    let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
+    let launch_agents_dir = dirs
+        ::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/LaunchAgents");
     tokio::fs::create_dir_all(&launch_agents_dir).block_on()?;
-    tokio::fs::write(launch_agents_dir.join(format!("com.{}.plist", app_name)), plist_content).block_on()?;
+    tokio::fs
+        ::write(launch_agents_dir.join(format!("com.{}.plist", app_name)), plist_content)
+        .block_on()?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 async fn remove_from_startup(app_name: &str) -> Result<()> {
-    let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
+    let launch_agents_dir = dirs
+        ::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/LaunchAgents");
     let path = launch_agents_dir.join(format!("com.{}.plist", app_name));
     if path.exists() {
         tokio::fs::remove_file(path).block_on()?;
@@ -1623,7 +2011,10 @@ async fn remove_from_startup(app_name: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn is_in_startup(app_name: &str) -> Result<bool> {
-    let launch_agents_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Library/LaunchAgents");
+    let launch_agents_dir = dirs
+        ::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/LaunchAgents");
     Ok(launch_agents_dir.join(format!("com.{}.plist", app_name)).exists())
 }
 
@@ -1647,7 +2038,8 @@ async fn main() -> Result<()> {
             match session_type.as_str() {
                 "wayland" => env::set_var("WINIT_UNIX_BACKEND", "wayland"),
                 "x11" => env::set_var("WINIT_UNIX_BACKEND", "x11"),
-                _ => println!("Unknown session type: {}, letting winit choose the backend", session_type),
+                _ =>
+                    println!("Unknown session type: {}, letting winit choose the backend", session_type),
             }
         } else {
             println!("XDG_SESSION_TYPE not set, letting winit choose the backend");
@@ -1666,17 +2058,20 @@ async fn main() -> Result<()> {
     });
 
     setup_login_handler(&ui, &black_square_window);
-    setup_register_handler(ui.clone()).await;  // Await and propagate errors
-    setup_import_handler(ui.clone(), black_square_window.clone()).await;  // Await and propagate errors
+    setup_register_handler(ui.clone()).await; // Await and propagate errors
+    setup_import_handler(ui.clone(), black_square_window.clone()).await; // Await and propagate errors
 
     let app_name = "EZPass";
-    let app_path = std::env::current_exe()?
+    let app_path = std::env
+        ::current_exe()?
         .to_str()
         .ok_or_else(|| anyhow!("Failed to get executable path"))?
         .to_string();
-    if let Ok(is_enabled) = is_in_startup(app_name).await {  // Await the Future
+    if let Ok(is_enabled) = is_in_startup(app_name).await {
+        // Await the Future
         black_square_window.set_autostart_enabled(is_enabled);
-    } else if add_to_startup(app_name, &app_path).await.is_ok() {  // Await the Future
+    } else if add_to_startup(app_name, &app_path).await.is_ok() {
+        // Await the Future
         black_square_window.set_autostart_enabled(true);
     }
 
